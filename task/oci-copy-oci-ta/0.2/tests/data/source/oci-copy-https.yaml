@@ -1,0 +1,33 @@
+# task/oci-copy-oci-ta/0.2/tests/data/source/oci-copy-https.yaml
+# This manifest describes artifacts that should be downloaded via HTTPS
+# and then pushed to an OCI registry.
+#
+# It assumes an HTTP server is running (e.g., via setup-http-server.sh)
+# serving files from tests/data/http-server-files/ at http://localhost:8080/
+# (or https if an HTTPS server is set up).
+# The actual URL will be parameterized in the TaskRun.
+
+artifact_type: "application/vnd.konflux.archive.v1" # Using a descriptive, custom type
+artifacts:
+  - filename: "test-file-alpha.txt" # Will be stored as this name in the OCI artifact
+    # source will be parameterized in the TaskRun, e.g., http://http-server-service.default.svc.cluster.local:8080/test-file-alpha.txt
+    source: "https://localhost:8443/test-file-alpha.txt" # Placeholder URL, will be overridden
+    type: "text/plain"
+    sha256sum: "ec1b81895f4da3e6c869ee432f371ccb425b0ba00e9538fd2a17b51b82270e0b"
+
+  - filename: "test-file-beta.dat" # Will be stored as this name in the OCI artifact
+    source: "https://localhost:8443/test-file-beta.dat" # Placeholder URL, will be overridden
+    type: "application/octet-stream"
+    sha256sum: "3cd02c6a326306f93d913c6f942a6010cd62853818b3d43fbcd012df584d1d2a"
+
+  # Example of an artifact that might be intentionally missing from the server
+  # - filename: "non-existent-http-file.txt"
+  #   source: "https://localhost:8443/non-existent-http-file.txt"
+  #   type: "text/plain"
+  #   sha256sum: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" # Dummy SHA
+
+  # Example of an artifact with a SHA256 mismatch
+  # - filename: "sha256-mismatch-file.txt"
+  #   source: "https://localhost:8443/test-file-alpha.txt" # Using alpha's content
+  #   type: "text/plain"
+  #   sha256sum: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" # Incorrect SHA

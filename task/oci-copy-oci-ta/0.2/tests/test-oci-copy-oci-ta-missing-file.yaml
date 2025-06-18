@@ -1,0 +1,46 @@
+# task/oci-copy-oci-ta/0.2/tests/test-oci-copy-oci-ta-missing-file.yaml
+# Tekton TaskRun definition for an oci-copy-oci-ta execution
+# that is expected to FAIL due to a missing source file.
+#
+# This TaskRun attempts to copy artifacts defined in 'oci-copy-missing-file.yaml',
+# where one of the declared artifacts (e.g., a non-existent-file.txt)
+# is intentionally missing from the source workspace.
+#
+# Prerequisites:
+# 1. A mock OCI registry (not strictly needed for this failure case, but good for consistency).
+# 2. The 'oci-copy-missing-file.yaml' manifest (to be created separately) which lists
+#    a non-existent file.
+# 3. A PVC 'source-pvc' containing 'oci-copy-missing-file.yaml' but NOT the
+#    non-existent file it references.
+#
+# Expected Behavior:
+# - The oci-copy-oci-ta task should attempt to process 'oci-copy-missing-file.yaml'.
+# - It should fail when it cannot find one of the source files listed in the manifest.
+# - The TaskRun should complete with a "Failed" status.
+# - The logs should indicate an error related to "file not found" or "cannot access source file".
+
+apiVersion: tekton.dev/v1beta1
+kind: TaskRun
+metadata:
+  name: oci-copy-oci-ta-missing-file-run
+spec:
+  taskRef:
+    name: oci-copy-oci-ta
+    kind: Task
+  params:
+    - name: oci_artifact_manifest
+      value: "source-data/oci-copy-missing-file.yaml" # This manifest will list a non-existent file
+    - name: destination_image_repo
+      value: "oci-registry-service.default.svc.cluster.local:5000/konflux-test/oci-copy-fail-test"
+    # - name: tls_verify
+    #   value: "false"
+  workspaces:
+    - name: source # This workspace will contain oci-copy-missing-file.yaml but not the actual missing file
+      persistentVolumeClaim:
+        claimName: source-pvc
+      # subPath: source-data-missing # Optional: use a subPath if oci-copy-missing-file.yaml is in a specific dir
+    # - name: sslcertdir
+    #   emptyDir: {} # Not strictly needed if tls_verify is false or registry is HTTP
+  # podTemplate:
+  #   securityContext:
+  #     fsGroup: 1001

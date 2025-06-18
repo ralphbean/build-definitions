@@ -1,0 +1,36 @@
+# task/oci-copy-oci-ta/0.2/tests/data/mock-registry/registry-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oci-registry
+  labels:
+    app: oci-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oci-registry
+  template:
+    metadata:
+      labels:
+        app: oci-registry
+    spec:
+      containers:
+      - name: registry
+        image: registry:2 # Using official docker registry image
+        ports:
+        - containerPort: 5000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oci-registry-service
+  labels:
+    app: oci-registry
+spec:
+  ports:
+  - port: 5000
+    targetPort: 5000
+  selector:
+    app: oci-registry
+  type: ClusterIP

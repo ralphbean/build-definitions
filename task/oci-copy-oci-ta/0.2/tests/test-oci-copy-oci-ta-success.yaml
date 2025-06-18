@@ -1,0 +1,55 @@
+# task/oci-copy-oci-ta/0.2/tests/test-oci-copy-oci-ta-success.yaml
+# Tekton TaskRun definition for a successful oci-copy-oci-ta execution.
+# This TaskRun simulates copying OCI artifacts (a tarball and a README)
+# to a mock OCI registry.
+#
+# Prerequisites:
+# 1. A mock OCI registry needs to be running in the cluster.
+#    (e.g., using the registry-deployment.yaml from tests/data/mock-registry)
+# 2. The source OCI artifacts (my-app-source.tar.gz, README.md, and oci-copy.yaml)
+#    must be accessible in a ConfigMap or a PersistentVolumeClaim. This example
+#    assumes they are available in a PVC named 'source-pvc' under 'source-data/'.
+#
+# Expected Behavior:
+# - The oci-copy-oci-ta task should successfully copy the specified artifacts
+#   to the mock OCI registry (oci-registry-service.default.svc.cluster.local:5000).
+# - The TaskRun should complete with a "Succeeded" status.
+# - The results should include the image URL and image digest for each copied artifact.
+
+apiVersion: tekton.dev/v1beta1
+kind: TaskRun
+metadata:
+  name: oci-copy-oci-ta-success-run
+  # namespace: your-target-namespace # Optional: specify if not default
+spec:
+  taskRef:
+    name: oci-copy-oci-ta # Assuming the task is named 'oci-copy-oci-ta'
+    kind: Task
+  params:
+    - name: oci_artifact_manifest
+      value: "source-data/oci-copy.yaml" # Path to the artifact manifest within the workspace
+    - name: destination_image_repo
+      value: "oci-registry-service.default.svc.cluster.local:5000/konflux-test/oci-copy-test"
+    # - name: destination_image_tag # Optional: defaults to "latest" if not provided
+    #   value: "v1.0"
+    # - name: destination_image_digest_file # Optional: file to write the digest to
+    #   value: "image-digest.txt"
+    # - name: tls_verify # Optional: defaults to true
+    #   value: "false" # Set to false if your mock registry uses self-signed certs or no TLS
+    # - name: ca_trust_config_map_name # Optional: for custom CA certs
+    #   value: "my-ca-certs"
+    # - name: service_account_name # Optional: if your task needs specific permissions
+    #   value: "oci-pusher-sa"
+  workspaces:
+    - name: source
+      persistentVolumeClaim:
+        claimName: source-pvc # Replace with your PVC name if different
+      # Example using a ConfigMap (less common for binary data like tar.gz but possible for small text files)
+      # configMap:
+      #   name: oci-source-data
+    # - name: sslcertdir # Optional: if providing custom CA certs via a ConfigMap mapped to /etc/pki/tls/certs
+    #   configMap:
+    #     name: my-ca-certs
+  # podTemplate: # Optional: For advanced pod configuration
+  #   securityContext:
+  #     fsGroup: 1001

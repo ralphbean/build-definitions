@@ -1,0 +1,11 @@
+# task/oci-copy-oci-ta/0.2/tests/data/source/oci-copy.yaml
+artifact_type: "application/vnd.konflux.archive.v1" # Using a descriptive, custom type
+artifacts:
+  - filename: "my-app-source.tar.gz"
+    source: "file://./my-app-source.tar.gz"
+    type: "application/gzip"
+    sha256sum: "381f3373a9a2044906f097b8c818bd74f72dd12177472f38fa5d302cd874db65"
+  - filename: "README.md"
+    source: "file://./README.md"
+    type: "text/markdown"
+    sha256sum: "bfc4fa58a30a02e9d84eba77df25973af2f97abb246cea76cb5cc07130c37e04"

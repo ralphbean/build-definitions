@@ -1,0 +1,175 @@
+# task/oci-copy-oci-ta/0.2/tests/test-oci-copy-oci-ta-https-unavailable.yaml
+# Tekton Pipeline definition for testing oci-copy-oci-ta with an UNAVAILABLE HTTPS source.
+#
+# This Pipeline:
+# 1. Sets up prerequisites:
+#    - Deploys a mock OCI registry.
+#    - It does NOT deploy the mock HTTP server, or deploys one that doesn't serve the target files.
+# 2. Runs the oci-copy-oci-ta task:
+#    - Uses 'oci-copy-https.yaml' manifest which points to HTTPS URLs.
+#    - Since the HTTP server is unavailable or misconfigured, the download should fail.
+# 3. The oci-copy-oci-ta task is expected to FAIL.
+#
+# Parameters:
+# - targetNamespace: The namespace where all resources will be deployed and tests run.
+#
+# Workspaces:
+# - task-source: Contains the oci-copy-oci-ta task definition.
+# - test-data: Contains test manifests like oci-copy-https.yaml.
+
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-oci-copy-oci-ta-https-unavailable-pipeline
+spec:
+  description: >-
+    A pipeline to test oci-copy-oci-ta's failure handling when an HTTPS source
+    is unavailable. It deploys a mock OCI registry but intentionally
+    does not deploy the HTTP/HTTPS server, or ensures the target files are not served.
+  params:
+    - name: targetNamespace
+      type: string
+      description: The Kubernetes namespace where resources will be deployed and tests will run.
+      default: "oci-copy-fail-ns"
+    - name: oci_copy_https_manifest_name
+      type: string
+      description: Name of the oci-copy manifest file for HTTPS test.
+      default: "oci-copy-https.yaml" # This manifest lists files expected from the (absent) HTTPS server
+    - name: destination_image_repo_base
+      type: string
+      description: Base repository URL for the destination OCI registry.
+      default: "oci-registry-service.$(params.targetNamespace).svc.cluster.local:5000/konflux-https-unavailable-test"
+
+  workspaces:
+    - name: task-source
+      description: A workspace containing the Tekton task definition for oci-copy-oci-ta.
+    - name: test-data
+      description: A workspace containing test data like oci-copy-https.yaml.
+
+  tasks:
+    # --------------------------------------------------------------------------
+    # Task 1: Create Namespace
+    # --------------------------------------------------------------------------
+    - name: create-test-namespace
+      displayName: Create Test Namespace
+      taskSpec:
+        params:
+          - name: NS_NAME
+            type: string
+        steps:
+          - name: create-ns
+            image: bitnami/kubectl:latest
+            script: |
+              #!/bin/sh
+              set -e
+              if kubectl get namespace $(params.NS_NAME) > /dev/null 2>&1; then
+                echo "Namespace $(params.NS_NAME) already exists."
+              else
+                kubectl create namespace $(params.NS_NAME)
+                echo "Namespace $(params.NS_NAME) created."
+              fi
+      params:
+        - name: NS_NAME
+          value: "$(params.targetNamespace)"
+
+    # --------------------------------------------------------------------------
+    # Task 2: Deploy Mock OCI Registry (still needed as a push target, though push won't happen)
+    # --------------------------------------------------------------------------
+    - name: deploy-mock-oci-registry
+      displayName: Deploy Mock OCI Registry
+      runAfter: [create-test-namespace]
+      taskSpec:
+        params:
+          - name: NS_NAME
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: deploy-registry
+            image: bitnami/kubectl:latest
+            workingDir: $(workspaces.data.path)/data/mock-registry
+            script: |
+              #!/bin/sh
+              set -e
+              kubectl apply -f registry-deployment.yaml -n $(params.NS_NAME)
+              echo "Waiting for OCI registry to be ready..."
+              kubectl wait --for=condition=available deployment/oci-registry \
+                -n $(params.NS_NAME) --timeout=120s
+              echo "Mock OCI registry is ready."
+      workspaces:
+        - name: data
+          workspace: test-data
+      params:
+        - name: NS_NAME
+          value: "$(params.targetNamespace)"
+
+    # --------------------------------------------------------------------------
+    # Task 3: Mock HTTP Server is INTENTIONALLY NOT DEPLOYED or misconfigured
+    # This task can be a no-op or ensure no conflicting server exists.
+    # For this test, we simply don't run the deploy-mock-http-server task.
+    # --------------------------------------------------------------------------
+    - name: ensure-http-server-is-down
+      displayName: Ensure HTTP Server is Down (No-Op)
+      runAfter: [create-test-namespace] # Can run in parallel with registry deploy
+      taskSpec:
+        steps:
+          - name: log-message
+            image: alpine/git # Any small image will do
+            script: |
+              echo "Intentionally not deploying mock HTTP/HTTPS server for this failure test."
+              echo "Alternatively, one could deploy an HTTP server that does NOT serve the files listed in $(params.oci_copy_https_manifest_name)."
+
+    # --------------------------------------------------------------------------
+    # Task 4: Run oci-copy-oci-ta Task - EXPECTED TO FAIL
+    # --------------------------------------------------------------------------
+    - name: run-oci-copy-https-unavailable-test
+      displayName: Run oci-copy-oci-ta with Unavailable HTTPS Source
+      runAfter: [deploy-mock-oci-registry, ensure-http-server-is-down]
+      taskRef:
+        name: oci-copy-oci-ta
+        kind: Task
+      params:
+        - name: oci_artifact_manifest
+          # URLs in oci-copy-https.yaml will point to a non-existent server or non-served files.
+          # e.g., https://non-existent-server.test/test-file-alpha.txt
+          # Or, if using the http-server-service DNS name, the service itself won't be up.
+          # The default manifest 'oci-copy-https.yaml' has localhost URLs.
+          # If no server is running on the pod's localhost, or on the configured service endpoint, it will fail.
+          value: "source/$(params.oci_copy_https_manifest_name)"
+        - name: destination_image_repo
+          value: "$(params.destination_image_repo_base)/should-not-be-pushed"
+        # - name: tls_verify_https_downloads # Default is often true, which is fine.
+        #   value: "true"                   # Or "false" if testing specific error paths.
+      workspaces:
+        - name: task-source
+          workspace: task-source
+        - name: source
+          workspace: test-data
+      # This task is expected to fail. Tekton by default fails the Pipeline if a task fails.
+      # To handle this gracefully and check for specific failure, one might use `onError` in a PipelineRun
+      # or inspect results. For this test, we rely on the PipelineRun itself failing.
+
+  # --------------------------------------------------------------------------
+  # Finally block for cleanup
+  # --------------------------------------------------------------------------
+  finally:
+    - name: cleanup-resources
+      displayName: Cleanup Test Resources
+      taskSpec:
+        params:
+          - name: NS_NAME
+            type: string
+        steps:
+          - name: delete-resources
+            image: bitnami/kubectl:latest
+            script: |
+              #!/bin/sh
+              echo "Cleaning up resources in namespace $(params.NS_NAME)..."
+              # Attempt to delete mock OCI registry (might not have been fully deployed if pipeline failed early)
+              kubectl delete deployment oci-registry -n $(params.NS_NAME) --ignore-not-found=true
+              kubectl delete service oci-registry-service -n $(params.NS_NAME) --ignore-not-found=true
+              # No HTTP server resources to delete in this failure test scenario.
+              echo "Cleanup complete."
+      params:
+        - name: NS_NAME
+          value: "$(params.targetNamespace)"

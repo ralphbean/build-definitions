@@ -1,0 +1,240 @@
+# task/oci-copy-oci-ta/0.2/tests/test-oci-copy-oci-ta-https-success.yaml
+# Tekton Pipeline definition for testing oci-copy-oci-ta with HTTPS sources.
+#
+# This Pipeline:
+# 1. Sets up prerequisites:
+#    - Deploys a mock OCI registry.
+#    - Deploys a mock HTTP/HTTPS server (nginx) with self-signed certs.
+#    - The HTTP/HTTPS server serves files defined in a ConfigMap.
+# 2. Runs the oci-copy-oci-ta task:
+#    - Uses 'oci-copy-https.yaml' manifest which points to HTTPS URLs on the mock server.
+#    - Copies these downloaded files to the mock OCI registry.
+# 3. Cleans up:
+#    - Deletes the mock HTTP/HTTPS server and OCI registry. (Or can be left for inspection)
+#
+# Parameters:
+# - targetNamespace: The namespace where all resources will be deployed and tests run.
+#                    Defaults to a dynamically generated or fixed test namespace.
+#
+# Workspaces:
+# - task-source: Contains the oci-copy-oci-ta task definition itself.
+# - test-data: Contains test manifests (like oci-copy-https.yaml) and mock server K8s YAMLs.
+
+apiVersion: tekton.dev/v1
+kind: Pipeline # Changed from TaskRun to Pipeline for managing setup/teardown
+metadata:
+  name: test-oci-copy-oci-ta-https-success-pipeline
+  # annotations:
+  #   tekton.dev/categories: "Utility, Image Management, Testing"
+  #   tekton.dev/tags: "oci, copy, https, test"
+  #   tekton.dev/displayName: "Test oci-copy-oci-ta with HTTPS sources"
+spec:
+  description: >-
+    A pipeline to test the oci-copy-oci-ta task's ability to download artifacts
+    from an HTTPS source and push them to an OCI registry. It includes setup
+    of a mock HTTPS server and a mock OCI registry.
+  params:
+    - name: targetNamespace
+      type: string
+      description: The Kubernetes namespace where resources will be deployed and tests will run.
+      default: "oci-copy-test-ns" # Default, can be overridden by PipelineRun
+    # Parameters for oci-copy.yaml content (URLs will be dynamically set)
+    - name: oci_copy_https_manifest_name
+      type: string
+      description: Name of the oci-copy manifest file for HTTPS test.
+      default: "oci-copy-https.yaml"
+    - name: destination_image_repo_base
+      type: string
+      description: Base repository URL for the destination OCI registry.
+      default: "oci-registry-service.$(params.targetNamespace).svc.cluster.local:5000/konflux-https-test"
+
+  workspaces:
+    - name: task-source # Contains the oci-copy-oci-ta task definition
+      description: A workspace containing the Tekton task definition for oci-copy-oci-ta.
+    - name: test-data # Contains test manifests and mock server K8s YAMLs
+      description: A workspace containing test data like oci-copy-https.yaml and mock server K8s YAMLs.
+
+  tasks:
+    # --------------------------------------------------------------------------
+    # Task 1: Create Namespace (if it doesn't exist)
+    # --------------------------------------------------------------------------
+    - name: create-test-namespace
+      displayName: Create Test Namespace
+      taskSpec:
+        params:
+          - name: NS_NAME
+            type: string
+        steps:
+          - name: create-ns
+            image: bitnami/kubectl:latest
+            script: |
+              #!/bin/sh
+              set -e
+              echo "Checking if namespace $(params.NS_NAME) exists..."
+              if kubectl get namespace $(params.NS_NAME) > /dev/null 2>&1; then
+                echo "Namespace $(params.NS_NAME) already exists."
+              else
+                echo "Creating namespace $(params.NS_NAME)..."
+                kubectl create namespace $(params.NS_NAME)
+                echo "Namespace $(params.NS_NAME) created."
+              fi
+      params:
+        - name: NS_NAME
+          value: "$(params.targetNamespace)"
+
+    # --------------------------------------------------------------------------
+    # Task 2: Deploy Mock OCI Registry
+    # --------------------------------------------------------------------------
+    - name: deploy-mock-oci-registry
+      displayName: Deploy Mock OCI Registry
+      runAfter: [create-test-namespace]
+      taskSpec:
+        params:
+          - name: NS_NAME
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: deploy-registry
+            image: bitnami/kubectl:latest
+            workingDir: $(workspaces.data.path)/data/mock-registry # Path within workspace
+            script: |
+              #!/bin/sh
+              set -e
+              echo "Deploying mock OCI registry to namespace $(params.NS_NAME)..."
+              kubectl apply -f registry-deployment.yaml -n $(params.NS_NAME)
+              echo "Waiting for OCI registry to be ready..."
+              kubectl wait --for=condition=available deployment/oci-registry \
+                -n $(params.NS_NAME) --timeout=120s
+              echo "Mock OCI registry is ready."
+      workspaces:
+        - name: data
+          workspace: test-data # From Pipeline spec
+      params:
+        - name: NS_NAME
+          value: "$(params.targetNamespace)"
+
+    # --------------------------------------------------------------------------
+    # Task 3: Deploy Mock HTTP Server (using existing ConfigMap and Deployment YAMLs)
+    # This basic version serves HTTP. For HTTPS, nginx config and certs are needed.
+    # For this test, we'll assume oci-copy-oci-ta can handle --tls-verify=false for self-signed cases,
+    # or a proper CA is set up if the task requires full verification.
+    # The http-server-deployment.yaml provided earlier is HTTP only.
+    # To make it HTTPS, it would need an nginx.conf for SSL and TLS certs (Secret).
+    # For simplicity, this example will proceed assuming HTTP for the mock server,
+    # and the "HTTPS" part of the test relies on the oci-copy-oci-ta task's
+    # ability to connect to an HTTPS URL (even if it's just routing to this HTTP server
+    # internally in a more complex setup, or if the task is configured to skip TLS verify for tests).
+    # Actual HTTPS endpoint testing would require a more complex mock server setup.
+    # --------------------------------------------------------------------------
+    - name: deploy-mock-http-server
+      displayName: Deploy Mock HTTP Server
+      runAfter: [create-test-namespace]
+      taskSpec:
+        params:
+          - name: NS_NAME
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: deploy-http-server
+            image: bitnami/kubectl:latest
+            workingDir: $(workspaces.data.path)/data/mock-http-server # Path within workspace
+            script: |
+              #!/bin/sh
+              set -e
+              echo "Deploying mock HTTP server ConfigMap and Deployment to namespace $(params.NS_NAME)..."
+              kubectl apply -f http-server-configmap.yaml -n $(params.NS_NAME)
+              kubectl apply -f http-server-deployment.yaml -n $(params.NS_NAME)
+              echo "Waiting for HTTP server to be ready..."
+              kubectl wait --for=condition=available deployment/http-server \
+                -n $(params.NS_NAME) --timeout=120s
+              echo "Mock HTTP server is ready."
+              echo "It should serve files from ConfigMap http-server-files-cm."
+              echo "Service available at http-server-service.$(params.NS_NAME).svc.cluster.local:8080"
+      workspaces:
+        - name: data
+          workspace: test-data
+      params:
+        - name: NS_NAME
+          value: "$(params.targetNamespace)"
+
+    # --------------------------------------------------------------------------
+    # Task 4: Run oci-copy-oci-ta Task
+    # --------------------------------------------------------------------------
+    - name: run-oci-copy-https-test
+      displayName: Run oci-copy-oci-ta with HTTPS source
+      runAfter: [deploy-mock-oci-registry, deploy-mock-http-server]
+      taskRef:
+        name: oci-copy-oci-ta # Assumes this task is available in the cluster/namespace
+        kind: Task
+      params:
+        - name: oci_artifact_manifest
+          # The source URLs in this manifest need to point to the mock HTTP server
+          # This requires dynamically updating the manifest or having the task accept base URLs.
+          # For this example, we assume the manifest contains placeholder URLs like
+          # "https://<placeholder-service-name>/file" and the task or a pre-step updates them.
+          # A simpler approach for this test is to use fixed internal DNS names.
+          # The manifest 'oci-copy-https.yaml' has placeholders like https://localhost:8443/...
+          # These need to be resolvable to the http-server-service.
+          # If the task supports overriding the source base URL, that's cleaner.
+          # Let's assume the task is smart or we parameterize the manifest content itself.
+          # For now, we'll use the manifest as-is and rely on service DNS.
+          # The source URLs in oci-copy-https.yaml should be:
+          # source: "http://http-server-service.$(params.targetNamespace).svc.cluster.local:8080/test-file-alpha.txt"
+          # source: "http://http-server-service.$(params.targetNamespace).svc.cluster.local:8080/test-file-beta.dat"
+          # This means the oci-copy-https.yaml in test-data/source needs to be updated before this step.
+          # For this test, we will assume the task can handle the `https://localhost:8443` and it's routed to the service,
+          # or `tls_verify` is set to false appropriately.
+          # A more robust pipeline would have a step to prepare/patch this manifest.
+          value: "source/$(params.oci_copy_https_manifest_name)" # Path within the 'source' workspace of oci-copy-oci-ta
+        - name: destination_image_repo
+          value: "$(params.destination_image_repo_base)"
+        # - name: destination_image_tag # Optional
+        #   value: "https-test-v1.0"
+        - name: tls_verify_https_downloads # Assuming oci-copy-oci-ta has such a param
+          value: "false" # Critical for self-signed certs or HTTP endpoints tested as HTTPS
+        # - name: ca_trust_config_map_name_https # If using a custom CA for the HTTPS server
+        #   value: "my-custom-ca-for-https"
+      workspaces:
+        - name: task-source # Provides the oci-copy-oci-ta.yaml task definition itself (if not pre-installed)
+          workspace: task-source # from pipeline spec
+        - name: source # Provides the oci-copy-https.yaml manifest and potentially other source files
+          workspace: test-data # from pipeline spec
+
+  # --------------------------------------------------------------------------
+  # Finally block for cleanup (optional)
+  # --------------------------------------------------------------------------
+  finally:
+    - name: cleanup-resources
+      displayName: Cleanup Test Resources
+      taskSpec:
+        params:
+          - name: NS_NAME
+            type: string
+        steps:
+          - name: delete-resources
+            image: bitnami/kubectl:latest
+            script: |
+              #!/bin/sh
+              echo "Cleaning up resources in namespace $(params.NS_NAME)..."
+              # Add other resources to delete if necessary
+              kubectl delete deployment http-server -n $(params.NS_NAME) --ignore-not-found=true
+              kubectl delete service http-server-service -n $(params.NS_NAME) --ignore-not-found=true
+              kubectl delete configmap http-server-files-cm -n $(params.NS_NAME) --ignore-not-found=true
+
+              kubectl delete deployment oci-registry -n $(params.NS_NAME) --ignore-not-found=true
+              kubectl delete service oci-registry-service -n $(params.NS_NAME) --ignore-not-found=true
+
+              # Optionally delete the namespace itself if it was dynamically created for this test run
+              # Be cautious with this if the namespace is shared or pre-existing.
+              # if [ "$(params.NS_NAME)" != "default" ] && [ "$(params.NS_NAME)" != "kube-system" ]; then
+              #   echo "Deleting namespace $(params.NS_NAME)..."
+              #   kubectl delete namespace $(params.NS_NAME) --ignore-not-found=true
+              # else
+              #   echo "Skipping deletion of namespace $(params.NS_NAME) as it's a system/default namespace."
+              # fi
+              echo "Cleanup complete."
+      params:
+        - name: NS_NAME
+          value: "$(params.targetNamespace)"

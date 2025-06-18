@@ -1,0 +1,19 @@
+# task/oci-copy-oci-ta/0.2/tests/data/mock-http-server/http-server-configmap.yaml
+# ConfigMap to hold the files that will be served by the mock HTTP/HTTPS server.
+# These files are used to test the HTTPS download capability of oci-copy-oci-ta.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: http-server-files-cm
+  # namespace: oci-copy-ta-0-2-testns # Will be deployed to the test namespace
+data:
+  test-file-alpha.txt: |
+    This is test file alpha for HTTPS download.
+    It contains simple text.
+  test-file-beta.dat: |
+    Beta0123456789Beta
+    This is the content of beta.dat.
+  # Add other files here if needed for testing, e.g.:
+  # another-file.json: |
+  #   { "message": "Hello from ConfigMap!" }
