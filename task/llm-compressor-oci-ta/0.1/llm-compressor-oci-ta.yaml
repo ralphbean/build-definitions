@@ -267,6 +267,9 @@ spec:
         echo "Attempting to list CDI devices with podman:"
         podman run --rm --device-cdi-list || echo "Failed to list CDI devices with podman"
 
+        echo "Checking for NVIDIA device nodes:"
+        ls -la /dev/nvidia* 2>/dev/null || echo "No /dev/nvidia* devices found"
+
         # Execute without outer sh -c wrapper to prevent injection
         unshare -Uf "${UNSHARE_ARGS[@]}" --keep-caps -r --map-users 1,1,65536 --map-groups 1,1,65536 -w /var/workdir "${BUILDAH_ARGS[@]}"
 
