@@ -1,6 +1,6 @@
 # llm-compressor-oci-ta
 
-Compresses large language models using llm-compressor from the vllm project and pushes the compressed model as an OCI artifact to a container registry. The task executes user-provided Python compression scripts in a hermetic environment with optional cachi2-prefetched dependencies.
+Compresses large language models using llm-compressor from the vllm project and pushes the compressed model as an OCI artifact to a container registry. The task executes user-provided compression scripts (Python or shell) in a hermetic environment with optional cachi2-prefetched dependencies.
 
 ## Overview
 
@@ -17,7 +17,7 @@ This task allows data scientists to compress LLM models as part of a Konflux bui
 | SOURCE_ARTIFACT | Trusted artifact URI with compression script and source | - | Yes |
 | IMAGE | OCI reference where compressed model will be pushed | - | Yes |
 | COMPRESSOR_IMAGE | Container image with llm-compressor installed | - | Yes |
-| SCRIPT | Path to compression script relative to source root (e.g., "scripts/compress.py") | - | Yes |
+| SCRIPT | Path to compression script relative to source root (e.g., "scripts/compress.py" or "scripts/compress.sh") | - | Yes |
 | CACHI2_ARTIFACT | Trusted artifact with prefetched dependencies | "" | No |
 | HERMETIC | Execute compression without network access | "true" | No |
 | OUTPUT_DIR | Directory where script writes output files | /var/workdir/output | No |
@@ -38,7 +38,7 @@ This task allows data scientists to compress LLM models as part of a Konflux bui
 
 ## Compression Script Requirements
 
-Your Python compression script must:
+Your compression script (Python or shell) must:
 
 1. **Read input** from `/var/workdir/source` (your source code repository)
 2. **Write output** to the directory specified in `OUTPUT_DIR` parameter (default: `/var/workdir/output`)

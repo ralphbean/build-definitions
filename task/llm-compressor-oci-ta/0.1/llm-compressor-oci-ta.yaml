@@ -12,8 +12,8 @@ metadata:
 spec:
   description: |-
     Compresses large language models using llm-compressor from the vllm project and pushes the
-    compressed model to an OCI registry. The task executes user-provided Python compression scripts
-    in a hermetic environment with optional cachi2-prefetched dependencies.
+    compressed model to an OCI registry. The task executes user-provided compression scripts
+    (Python or shell) in a hermetic environment with optional cachi2-prefetched dependencies.
   params:
     - name: SOURCE_ARTIFACT
       description: The Trusted Artifact URI pointing to the artifact with the application source code.
@@ -29,7 +29,7 @@ spec:
       description: Container image with llm-compressor and dependencies installed
       type: string
     - name: SCRIPT
-      description: Path to the Python compression script relative to the source root (e.g., "scripts/compress.py")
+      description: Path to the compression script relative to the source root (e.g., "scripts/compress.py" or "scripts/compress.sh")
       type: string
     - name: HERMETIC
       description: Execute compression without network access
