@@ -54,6 +54,7 @@ spec:
               mkdir -p "$(workspaces.tests-workspace.path)/source"
 
               # Create the mock compression script that records environment variables
+              # This script matches tests/mocks/mock-compress.py (canonical version)
               cat > "$(workspaces.tests-workspace.path)/source/compress.py" << 'SCRIPT_EOF'
               #!/usr/bin/env python3
               import os
@@ -62,7 +63,7 @@ spec:
               import sys
 
               def main():
-                  print("Starting mock model compression in hermetic mode...")
+                  print("Starting mock model compression...")
                   time.sleep(2)
 
                   output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
@@ -71,20 +72,33 @@ spec:
 
                   # Create mock model files
                   with open(os.path.join(output_dir, "model.safetensors"), "w") as f:
-                      f.write("HERMETIC_COMPRESSED_MODEL_" * 50)
-                  print(f"Created mock weights file")
+                      f.write("MOCK_COMPRESSED_MODEL_WEIGHTS_DATA_" * 100)
+                  print(f"Created mock weights file: {os.path.join(output_dir, 'model.safetensors')}")
 
                   config = {
                       "model_type": "mamallama",
+                      "hidden_size": 4096,
+                      "num_hidden_layers": 32,
+                      "num_attention_heads": 32,
+                      "vocab_size": 32000,
                       "compressed": True,
-                      "hermetic": True,
-                      "quantization": {"bits": 4, "scheme": "W4A16"}
+                      "compression_method": "gptq",
+                      "quantization": {
+                          "bits": 4,
+                          "group_size": 128,
+                          "scheme": "W4A16"
+                      }
                   }
                   with open(os.path.join(output_dir, "config.json"), "w") as f:
                       json.dump(config, f, indent=2)
-                  print(f"Created mock config file")
+                  print(f"Created mock config file: {os.path.join(output_dir, 'config.json')}")
 
-                  # Record environment variables to verify hermetic mode
+                  tokenizer_data = {"vocab_size": 32000}
+                  with open(os.path.join(output_dir, "tokenizer.json"), "w") as f:
+                      json.dump(tokenizer_data, f, indent=2)
+                  print(f"Created mock tokenizer file: {os.path.join(output_dir, 'tokenizer.json')}")
+
+                  # Create environment file for verification
                   env_info = {
                       "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "NOT_SET"),
                       "HF_DATASETS_OFFLINE": os.environ.get("HF_DATASETS_OFFLINE", "NOT_SET"),
@@ -94,13 +108,15 @@ spec:
                   }
                   with open(os.path.join(output_dir, "environment.json"), "w") as f:
                       json.dump(env_info, f, indent=2)
+                  print(f"Created environment file: {os.path.join(output_dir, 'environment.json')}")
 
-                  print(f"\nMock hermetic compression complete!")
+                  # Print environment information
+                  print(f"\nMock compression complete!")
                   print("Environment variables:")
                   for key, value in env_info.items():
                       print(f"  {key}={value}")
 
-                  # Verify required environment variables are set
+                  # Verify hermetic environment if expected
                   if env_info["HF_HUB_OFFLINE"] != "1":
                       print("WARNING: HF_HUB_OFFLINE is not set to 1")
                   if env_info["HF_DATASETS_OFFLINE"] != "1":

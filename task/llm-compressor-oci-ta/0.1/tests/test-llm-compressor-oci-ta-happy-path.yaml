@@ -51,7 +51,7 @@ spec:
               mkdir -p "$(workspaces.tests-workspace.path)/source"
 
               # Create the mock compression script
-              # This script simulates llm-compressor output for testing
+              # This script matches tests/mocks/mock-compress.py (canonical version)
               cat > "$(workspaces.tests-workspace.path)/source/compress.py" << 'SCRIPT_EOF'
               #!/usr/bin/env python3
               import os
@@ -70,30 +70,56 @@ spec:
                   # Create mock model files
                   with open(os.path.join(output_dir, "model.safetensors"), "w") as f:
                       f.write("MOCK_COMPRESSED_MODEL_WEIGHTS_DATA_" * 100)
-                  print(f"Created mock weights file")
+                  print(f"Created mock weights file: {os.path.join(output_dir, 'model.safetensors')}")
 
                   config = {
                       "model_type": "mamallama",
+                      "hidden_size": 4096,
+                      "num_hidden_layers": 32,
+                      "num_attention_heads": 32,
+                      "vocab_size": 32000,
                       "compressed": True,
-                      "quantization": {"bits": 4, "scheme": "W4A16"}
+                      "compression_method": "gptq",
+                      "quantization": {
+                          "bits": 4,
+                          "group_size": 128,
+                          "scheme": "W4A16"
+                      }
                   }
                   with open(os.path.join(output_dir, "config.json"), "w") as f:
                       json.dump(config, f, indent=2)
-                  print(f"Created mock config file")
+                  print(f"Created mock config file: {os.path.join(output_dir, 'config.json')}")
 
-                  tokenizer = {"vocab_size": 32000}
+                  tokenizer_data = {"vocab_size": 32000}
                   with open(os.path.join(output_dir, "tokenizer.json"), "w") as f:
-                      json.dump(tokenizer, f, indent=2)
-                  print(f"Created mock tokenizer file")
+                      json.dump(tokenizer_data, f, indent=2)
+                  print(f"Created mock tokenizer file: {os.path.join(output_dir, 'tokenizer.json')}")
 
                   # Create environment file for verification
                   env_info = {
                       "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "NOT_SET"),
                       "HF_DATASETS_OFFLINE": os.environ.get("HF_DATASETS_OFFLINE", "NOT_SET"),
-                      "HF_HOME": os.environ.get("HF_HOME", "NOT_SET")
+                      "HF_HOME": os.environ.get("HF_HOME", "NOT_SET"),
+                      "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE", "NOT_SET"),
+                      "PIP_INDEX_URL": os.environ.get("PIP_INDEX_URL", "NOT_SET")
                   }
                   with open(os.path.join(output_dir, "environment.json"), "w") as f:
                       json.dump(env_info, f, indent=2)
+                  print(f"Created environment file: {os.path.join(output_dir, 'environment.json')}")
+
+                  # Print environment information
+                  print(f"\nMock compression complete!")
+                  print("Environment variables:")
+                  for key, value in env_info.items():
+                      print(f"  {key}={value}")
+
+                  # Verify hermetic environment if expected
+                  if env_info["HF_HUB_OFFLINE"] != "1":
+                      print("WARNING: HF_HUB_OFFLINE is not set to 1")
+                  if env_info["HF_DATASETS_OFFLINE"] != "1":
+                      print("WARNING: HF_DATASETS_OFFLINE is not set to 1")
+                  if env_info["HF_HOME"] == "NOT_SET":
+                      print("WARNING: HF_HOME is not set")
 
                   print("\nMock compression complete! Created files:")
                   for filename in os.listdir(output_dir):
