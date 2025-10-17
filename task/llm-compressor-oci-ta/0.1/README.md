@@ -17,7 +17,7 @@ This task allows data scientists to compress LLM models as part of a Konflux bui
 | SOURCE_ARTIFACT | Trusted artifact URI with compression script and source | - | Yes |
 | IMAGE | OCI reference where compressed model will be pushed | - | Yes |
 | COMPRESSOR_IMAGE | Container image with llm-compressor installed | - | Yes |
-| SCRIPT | Python script that performs compression | - | Yes |
+| SCRIPT | Path to compression script relative to source root (e.g., "scripts/compress.py") | - | Yes |
 | CACHI2_ARTIFACT | Trusted artifact with prefetched dependencies | "" | No |
 | HERMETIC | Execute compression without network access | "true" | No |
 | OUTPUT_DIR | Directory where script writes output files | /var/workdir/output | No |
@@ -113,7 +113,30 @@ torch
 huggingface-hub
 ```
 
-### 2. Run Compression
+### 2. Create Compression Script in Your Repository
+
+Add your compression script to your source repository (e.g., `scripts/compress_model.py`):
+
+```python
+#!/usr/bin/env python3
+import os
+from llmcompressor.transformers import oneshot
+
+# Output directory from task parameter
+output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
+
+# Compress the model using prefetched dependencies
+oneshot(
+    model="meta-llama/Meta-Llama-3-8B",
+    dataset="open_platypus",
+    recipe="gptq",
+    output_dir=output_dir,
+)
+
+print(f"Model compressed and saved to {output_dir}")
+```
+
+### 3. Run Compression
 
 ```yaml
 - name: compress-model
@@ -127,18 +150,7 @@ huggingface-hub
     - name: COMPRESSOR_IMAGE
       value: quay.io/myorg/llm-compressor:latest
     - name: SCRIPT
-      value: |
-        #!/usr/bin/env python3
-        import os
-        from llmcompressor.transformers import oneshot
-
-        output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
-        oneshot(
-            model="meta-llama/Meta-Llama-3-8B",
-            dataset="open_platypus",
-            recipe="gptq",
-            output_dir=output_dir,
-        )
+      value: "scripts/compress_model.py"
     - name: HERMETIC
       value: "true"
   runAfter:
@@ -148,7 +160,7 @@ huggingface-hub
     version: "0.1"
 ```
 
-### 3. Source Container Generation
+### 4. Source Container Generation
 
 The compressed model artifact is compatible with `source-build-oci-ta`:
 

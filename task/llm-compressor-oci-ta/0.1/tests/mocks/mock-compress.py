@@ -82,16 +82,24 @@ def main():
         "compression_tool": "llm-compressor",
         "compression_tool_version": "0.1.0-mock",
         "dataset": "open_platypus",
-        "hermetic": os.environ.get("HERMETIC", "false") == "true",
-        "environment_variables": {
-            "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "not set"),
-            "HF_DATASETS_OFFLINE": os.environ.get("HF_DATASETS_OFFLINE", "not set"),
-            "HF_HOME": os.environ.get("HF_HOME", "not set")
-        }
+        "hermetic": os.environ.get("HERMETIC", "false") == "true"
     }
     with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=2)
     print(f"Created mock metadata file: {metadata_file}")
+
+    # 6. Environment variables file (for hermetic verification)
+    env_file = os.path.join(output_dir, "environment.json")
+    env_info = {
+        "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "NOT_SET"),
+        "HF_DATASETS_OFFLINE": os.environ.get("HF_DATASETS_OFFLINE", "NOT_SET"),
+        "HF_HOME": os.environ.get("HF_HOME", "NOT_SET"),
+        "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE", "NOT_SET"),
+        "PIP_INDEX_URL": os.environ.get("PIP_INDEX_URL", "NOT_SET")
+    }
+    with open(env_file, "w") as f:
+        json.dump(env_info, f, indent=2)
+    print(f"Created environment file: {env_file}")
 
     # List all created files
     print("\nMock compression complete! Created files:")
@@ -100,13 +108,20 @@ def main():
         size = os.path.getsize(filepath)
         print(f"  - {filename} ({size} bytes)")
 
+    # Print environment information
+    print("\nEnvironment variables:")
+    for key, value in env_info.items():
+        print(f"  {key}={value}")
+
     # Verify hermetic environment if expected
     if os.environ.get("HERMETIC", "false") == "true":
-        print("\nHermetic mode enabled:")
-        print(f"  HF_HUB_OFFLINE: {os.environ.get('HF_HUB_OFFLINE', 'NOT SET')}")
-        print(f"  HF_DATASETS_OFFLINE: {os.environ.get('HF_DATASETS_OFFLINE', 'NOT SET')}")
-        if "HF_HOME" in os.environ:
-            print(f"  HF_HOME: {os.environ['HF_HOME']}")
+        print("\nHermetic mode verification:")
+        if env_info["HF_HUB_OFFLINE"] != "1":
+            print("  WARNING: HF_HUB_OFFLINE is not set to 1")
+        if env_info["HF_DATASETS_OFFLINE"] != "1":
+            print("  WARNING: HF_DATASETS_OFFLINE is not set to 1")
+        if env_info["HF_HOME"] == "NOT_SET":
+            print("  WARNING: HF_HOME is not set")
 
     print("\nMock compression script completed successfully!")
     return 0

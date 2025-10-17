@@ -29,7 +29,7 @@ spec:
       description: Container image with llm-compressor and dependencies installed
       type: string
     - name: SCRIPT
-      description: Python script that performs model compression
+      description: Path to the Python compression script relative to the source root (e.g., "scripts/compress.py")
       type: string
     - name: HERMETIC
       description: Execute compression without network access
@@ -159,8 +159,12 @@ spec:
           PREFETCH_SOURCE=". /cachi2/cachi2.env &&"
         fi
 
-        # Create the compression script file
-        printf '%s' "$SCRIPT" > /tmp/compress.py
+        # Copy the compression script from source
+        if [ ! -f "/var/workdir/source/${SCRIPT}" ]; then
+          echo "ERROR: Script not found: /var/workdir/source/${SCRIPT}"
+          exit 1
+        fi
+        cp "/var/workdir/source/${SCRIPT}" /tmp/compress.py
         chmod +x /tmp/compress.py
 
         mkdir -p "$OUTPUT_DIR"
