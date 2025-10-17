@@ -1,0 +1,241 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-llm-compressor-remote-oci-ta-localhost
+spec:
+  description: |
+    Test the llm-compressor-remote-oci-ta task in localhost mode (no actual remote VM).
+    The pre-apply-task-hook.sh creates an SSH secret with host=localhost which triggers
+    the localhost fallback code path, running the compression in-cluster instead of remotely.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: mock-trusted-artifact
+      params:
+        - name: ociStorage
+          value: registry-service.kind-registry/oci-ta:latest
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        results:
+        - name: SOURCE_ARTIFACT
+          type: string
+        workspaces:
+          - name: tests-workspace
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        params:
+          - name: ociStorage
+            type: string
+          - name: caTrustConfigMapName
+            type: string
+          - name: caTrustConfigMapKey
+            type: string
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: mock-source
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # Create a source directory with our mock compression script
+              mkdir -p "$(workspaces.tests-workspace.path)/source"
+
+              # Create the mock compression script
+              cat > "$(workspaces.tests-workspace.path)/source/compress.py" << 'SCRIPT_EOF'
+              #!/usr/bin/env python3
+              import os
+              import json
+              import time
+              import sys
+
+              def main():
+                  print("Starting mock model compression (remote task, localhost mode)...")
+                  time.sleep(2)
+
+                  output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
+                  print(f"Output directory: {output_dir}")
+                  os.makedirs(output_dir, exist_ok=True)
+
+                  # Create mock model files
+                  with open(os.path.join(output_dir, "model.safetensors"), "w") as f:
+                      f.write("MOCK_COMPRESSED_MODEL_WEIGHTS_DATA_" * 100)
+                  print(f"Created mock weights file: {os.path.join(output_dir, 'model.safetensors')}")
+
+                  config = {
+                      "model_type": "mamallama",
+                      "hidden_size": 4096,
+                      "num_hidden_layers": 32,
+                      "num_attention_heads": 32,
+                      "vocab_size": 32000,
+                      "compressed": True,
+                      "compression_method": "gptq",
+                      "quantization": {
+                          "bits": 4,
+                          "group_size": 128,
+                          "scheme": "W4A16"
+                      }
+                  }
+                  with open(os.path.join(output_dir, "config.json"), "w") as f:
+                      json.dump(config, f, indent=2)
+                  print(f"Created mock config file: {os.path.join(output_dir, 'config.json')}")
+
+                  tokenizer_data = {"vocab_size": 32000}
+                  with open(os.path.join(output_dir, "tokenizer.json"), "w") as f:
+                      json.dump(tokenizer_data, f, indent=2)
+                  print(f"Created mock tokenizer file: {os.path.join(output_dir, 'tokenizer.json')}")
+
+                  print("\nMock compression complete! Created files:")
+                  for filename in os.listdir(output_dir):
+                      print(f"  - {filename}")
+                  return 0
+
+              if __name__ == "__main__":
+                  sys.exit(main())
+              SCRIPT_EOF
+
+              chmod +x "$(workspaces.tests-workspace.path)/source/compress.py"
+
+              echo "Created source directory with test files:"
+              ls -la "$(workspaces.tests-workspace.path)/source"
+          - name: create-trusted-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.SOURCE_ARTIFACT.path)=$(workspaces.tests-workspace.path)/source
+    - name: run-llm-compressor-remote-task
+      taskRef:
+        name: llm-compressor-remote-oci-ta
+      params:
+        - name: SOURCE_ARTIFACT
+          value: $(tasks.mock-trusted-artifact.results.SOURCE_ARTIFACT)
+        - name: CACHI2_ARTIFACT
+          value: ""
+        - name: IMAGE
+          value: registry-service.kind-registry/test-compressed-model-remote:latest
+        - name: COMPRESSOR_IMAGE
+          value: "python:3.11-slim"
+        - name: SCRIPT
+          value: "compress.py"
+        - name: HERMETIC
+          value: "true"
+        - name: PLATFORM
+          value: "linux/amd64"
+        - name: SBOM_TYPE
+          value: "spdx"
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      runAfter:
+        - mock-trusted-artifact
+    - name: verify-llm-compressor-result
+      params:
+        - name: IMAGE_DIGEST
+          value: $(tasks.run-llm-compressor-remote-task.results.IMAGE_DIGEST)
+        - name: IMAGE_REF
+          value: $(tasks.run-llm-compressor-remote-task.results.IMAGE_REF)
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        params:
+          - name: IMAGE_DIGEST
+            type: string
+          - name: IMAGE_REF
+            type: string
+          - name: caTrustConfigMapName
+            type: string
+          - name: caTrustConfigMapKey
+            type: string
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: check-results-not-empty
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            env:
+              - name: IMAGE_DIGEST
+                value: $(params.IMAGE_DIGEST)
+              - name: IMAGE_REF
+                value: $(params.IMAGE_REF)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "Verifying results are populated..."
+
+              if [ -z "$IMAGE_DIGEST" ]; then
+                echo "ERROR: IMAGE_DIGEST is empty"
+                exit 1
+              fi
+              echo "✓ IMAGE_DIGEST: $IMAGE_DIGEST"
+
+              if [ -z "$IMAGE_REF" ]; then
+                echo "ERROR: IMAGE_REF is empty"
+                exit 1
+              fi
+              echo "✓ IMAGE_REF: $IMAGE_REF"
+
+              echo "All results are populated correctly!"
+          - name: check-artifact-exists
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            env:
+              - name: IMAGE_REF
+                value: $(params.IMAGE_REF)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "Verifying compressed model artifact was pushed to registry..."
+
+              # Remove tag from IMAGE_REF (skopeo doesn't support tag@digest)
+              IMAGE_REF_NO_TAG="${IMAGE_REF%%:*}@${IMAGE_REF##*@}"
+
+              if ! skopeo inspect --raw "docker://${IMAGE_REF_NO_TAG}"; then
+                echo "ERROR: Cannot inspect artifact at ${IMAGE_REF_NO_TAG}"
+                exit 1
+              fi
+
+              echo "✓ Artifact exists and is accessible"
+
+              # Check artifact type
+              artifactType=$(skopeo inspect --raw "docker://${IMAGE_REF_NO_TAG}" | jq -r '.artifactType')
+              echo "Artifact type: $artifactType"
+
+              if [ "$artifactType" != "application/vnd.ai.model.llm.compressed" ]; then
+                echo "ERROR: Expected artifactType 'application/vnd.ai.model.llm.compressed', got '$artifactType'"
+                exit 1
+              fi
+
+              echo "✓ Artifact type is correct"
+              echo "Localhost mode test complete!"
+      runAfter:
+        - run-llm-compressor-remote-task
