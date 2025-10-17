@@ -1,0 +1,95 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-llm-compressor-oci-ta-network-isolation
+  annotations:
+    test/assert-task-failure: "run-llm-compressor-task"
+spec:
+  description: |
+    Negative test to verify that HERMETIC=true actually enforces network isolation.
+    The script attempts to curl an external URL, which should fail in hermetic mode,
+    causing the task to fail (which is the expected behavior for this test).
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: mock-trusted-artifact
+      params:
+        - name: ociStorage
+          value: registry-service.kind-registry/oci-ta:latest
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        results:
+        - name: SOURCE_ARTIFACT
+          type: string
+        workspaces:
+          - name: tests-workspace
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        params:
+          - name: ociStorage
+          - name: caTrustConfigMapName
+          - name: caTrustConfigMapKey
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: mock-source
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # Create a source directory
+              mkdir -p "$(workspaces.tests-workspace.path)/source"
+
+              # Create a simple shell script that tries to access the network
+              # This should fail when HERMETIC=true
+              cat > "$(workspaces.tests-workspace.path)/source/network_test.sh" << 'SCRIPT_EOF'
+              #!/bin/bash
+              curl https://konflux-ci.dev/index.html
+              SCRIPT_EOF
+
+              chmod +x "$(workspaces.tests-workspace.path)/source/network_test.sh"
+
+              echo "Created network isolation test script"
+          - name: create-trusted-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.SOURCE_ARTIFACT.path)=$(workspaces.tests-workspace.path)/source
+    - name: run-llm-compressor-task
+      taskRef:
+        name: llm-compressor-oci-ta
+      params:
+        - name: SOURCE_ARTIFACT
+          value: $(tasks.mock-trusted-artifact.results.SOURCE_ARTIFACT)
+        - name: CACHI2_ARTIFACT
+          value: ""
+        - name: IMAGE
+          value: registry-service.kind-registry/test-network-isolation:latest
+        - name: COMPRESSOR_IMAGE
+          value: "quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c"
+        - name: SCRIPT
+          value: "network_test.sh"
+        - name: HERMETIC
+          value: "true"
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      runAfter:
+        - mock-trusted-artifact

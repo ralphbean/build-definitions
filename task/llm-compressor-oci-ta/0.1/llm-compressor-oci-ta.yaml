@@ -164,8 +164,11 @@ spec:
           echo "ERROR: Script not found: /var/workdir/source/${SCRIPT}"
           exit 1
         fi
-        cp "/var/workdir/source/${SCRIPT}" /tmp/compress.py
-        chmod +x /tmp/compress.py
+
+        # Preserve the original filename to support both .py and .sh scripts
+        SCRIPT_BASENAME=$(basename "${SCRIPT}")
+        cp "/var/workdir/source/${SCRIPT}" "/tmp/${SCRIPT_BASENAME}"
+        chmod +x "/tmp/${SCRIPT_BASENAME}"
 
         mkdir -p "$OUTPUT_DIR"
 
@@ -173,7 +176,8 @@ spec:
         # TODO remove the option once all hosts were updated
         buildah from --name compress-container --security-opt=unmask=/proc/interrupts "$COMPRESSOR_IMAGE"
 
-        BUILDAH_CMD="buildah run ${PREFETCH_MOUNT} --volume /tmp/compress.py:/tmp/compress.py --volume /var/workdir/source:/var/workdir/source --volume ${OUTPUT_DIR}:${OUTPUT_DIR} --workingdir /var/workdir/source --user root:root -- compress-container /bin/sh -c '${PREFETCH_SOURCE} exec python3 /tmp/compress.py'"
+        # Execute the script using its shebang (supports both .py and .sh scripts)
+        BUILDAH_CMD="buildah run ${PREFETCH_MOUNT} --volume /tmp/${SCRIPT_BASENAME}:/tmp/${SCRIPT_BASENAME} --volume /var/workdir/source:/var/workdir/source --volume ${OUTPUT_DIR}:${OUTPUT_DIR} --workingdir /var/workdir/source --user root:root -- compress-container /bin/sh -c '${PREFETCH_SOURCE} /tmp/${SCRIPT_BASENAME}'"
         unshare -Uf "${UNSHARE_ARGS[@]}" --keep-caps -r --map-users 1,1,65536 --map-groups 1,1,65536 -w /var/workdir sh -c "${BUILDAH_CMD}"
 
         IMAGE_REFERENCE=$(buildah inspect compress-container | jq -r '.FromImage')
