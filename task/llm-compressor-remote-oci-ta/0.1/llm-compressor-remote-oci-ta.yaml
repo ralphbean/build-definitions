@@ -308,6 +308,18 @@ spec:
 
       BUILDAH_ARGS+=("$INNER_CMD")
 
+      # Debug: Check for CDI device availability
+      echo "Checking for CDI devices:"
+      if [ -f /etc/cdi/nvidia.yaml ]; then
+        echo "Found /etc/cdi/nvidia.yaml:"
+        cat /etc/cdi/nvidia.yaml
+      else
+        echo "No /etc/cdi/nvidia.yaml found"
+      fi
+
+      echo "Attempting to list CDI devices with podman:"
+      podman run --rm --device-cdi-list || echo "Failed to list CDI devices with podman"
+
       # Execute without outer sh -c wrapper to prevent injection
       unshare -Uf "${UNSHARE_ARGS[@]}" --keep-caps -r --map-users 1,1,65536 --map-groups 1,1,65536 -w /var/workdir "${BUILDAH_ARGS[@]}"
 
