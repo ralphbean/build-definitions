@@ -1,0 +1,393 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: llm-compressor-oci-ta
+  annotations:
+    tekton.dev/pipelines.minVersion: 0.12.1
+    tekton.dev/tags: image-build, konflux, llm, model-compression
+  labels:
+    app.kubernetes.io/version: "0.1"
+    build.appstudio.redhat.com/build_type: llm-compression
+spec:
+  description: |-
+    Compresses large language models using llm-compressor from the vllm project and pushes the
+    compressed model to an OCI registry. The task executes user-provided Python compression scripts
+    in a hermetic environment with optional cachi2-prefetched dependencies.
+  params:
+    - name: SOURCE_ARTIFACT
+      description: The Trusted Artifact URI pointing to the artifact with the application source code.
+      type: string
+    - name: CACHI2_ARTIFACT
+      description: The Trusted Artifact URI pointing to the artifact with the prefetched dependencies.
+      type: string
+      default: ""
+    - name: IMAGE
+      description: Reference of the OCI artifact where the compressed model will be pushed
+      type: string
+    - name: COMPRESSOR_IMAGE
+      description: Container image with llm-compressor and dependencies installed
+      type: string
+    - name: SCRIPT
+      description: Python script that performs model compression
+      type: string
+    - name: HERMETIC
+      description: Execute compression without network access
+      type: string
+      default: "true"
+    - name: OUTPUT_DIR
+      description: Directory where the compression script writes output files
+      type: string
+      default: /var/workdir/output
+    - name: SBOM_TYPE
+      description: 'Select the SBOM format to generate. Valid values: spdx, cyclonedx.'
+      type: string
+      default: spdx
+    - name: STORAGE_DRIVER
+      description: Storage driver to configure for buildah
+      type: string
+      default: vfs
+    - name: caTrustConfigMapName
+      description: The name of the ConfigMap to read CA bundle data from.
+      type: string
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      description: The name of the key in the ConfigMap that contains the CA bundle data.
+      type: string
+      default: ca-bundle.crt
+  results:
+    - name: IMAGE_DIGEST
+      description: Digest of the compressed model artifact just pushed
+    - name: IMAGE_URL
+      description: Repository where the compressed model artifact was pushed
+    - name: IMAGE_REF
+      description: Image reference of the compressed model artifact with digest
+    - name: SBOM_BLOB_URL
+      description: Reference of SBOM blob digest to enable digest-based verification from provenance
+      type: string
+    - name: COMPRESSOR_IMAGE_REFERENCE
+      description: Reference and digest of the image used to run compression. Suitable to pass to buildah ADDITIONAL_BASE_IMAGES
+      type: string
+  volumes:
+    - name: trusted-ca
+      configMap:
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        name: $(params.caTrustConfigMapName)
+        optional: true
+    - name: workdir
+      emptyDir: {}
+    - name: varlibcontainers
+      emptyDir: {}
+  stepTemplate:
+    computeResources:
+      limits:
+        memory: 4Gi
+      requests:
+        cpu: "1"
+        memory: 1Gi
+    env:
+      - name: HERMETIC
+        value: $(params.HERMETIC)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: OUTPUT_DIR
+        value: $(params.OUTPUT_DIR)
+      - name: SBOM_TYPE
+        value: $(params.SBOM_TYPE)
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+  steps:
+    - name: use-trusted-artifact
+      image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+      args:
+        - use
+        - $(params.SOURCE_ARTIFACT)=/var/workdir/source
+        - $(params.CACHI2_ARTIFACT)=/var/workdir/cachi2
+      volumeMounts:
+        - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+          name: trusted-ca
+          readOnly: true
+          subPath: ca-bundle.crt
+    - name: compress-model
+      image: quay.io/konflux-ci/buildah-task:latest@sha256:c8d667a4efa2f05e73e2ac36b55928633d78857589165bd919d2628812d7ffcb
+      workingDir: /var/workdir
+      volumeMounts:
+        - mountPath: /mnt/trusted-ca
+          name: trusted-ca
+          readOnly: true
+        - mountPath: /var/lib/containers
+          name: varlibcontainers
+      env:
+        - name: SCRIPT
+          value: $(params.SCRIPT)
+        - name: COMPRESSOR_IMAGE
+          value: $(params.COMPRESSOR_IMAGE)
+        - name: STORAGE_DRIVER
+          value: $(params.STORAGE_DRIVER)
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        ca_bundle=/mnt/trusted-ca/ca-bundle.crt
+        if [ -f "$ca_bundle" ]; then
+          echo "INFO: Using mounted CA bundle: $ca_bundle"
+          cp -vf $ca_bundle /etc/pki/ca-trust/source/anchors
+          update-ca-trust
+        fi
+
+        # Fixing group permission on /var/lib/containers
+        chown root:root /var/lib/containers
+
+        sed -i 's/^\s*short-name-mode\s*=\s*.*/short-name-mode = "disabled"/' /etc/containers/registries.conf
+
+        # Setting new namespace to run buildah - 2^32-2
+        echo 'root:1:4294967294' | tee -a /etc/subuid >>/etc/subgid
+
+        UNSHARE_ARGS=()
+        if [ "${HERMETIC}" == "true" ]; then
+          echo "The compression will be executed with network isolation"
+          UNSHARE_ARGS+=("--net")
+        fi
+
+        PREFETCH_MOUNT=""
+        PREFETCH_SOURCE=""
+        if [ -d "/var/workdir/cachi2" ]; then
+          PREFETCH_MOUNT="--volume /var/workdir/cachi2:/cachi2"
+          PREFETCH_SOURCE=". /cachi2/cachi2.env &&"
+        fi
+
+        # Create the compression script file
+        printf '%s' "$SCRIPT" > /tmp/compress.py
+        chmod +x /tmp/compress.py
+
+        mkdir -p "$OUTPUT_DIR"
+
+        # "--security-opt=unmask=/proc/interrupts" is necessary for newer version of buildah if the host system does not contain up to date version of container-selinux
+        # TODO remove the option once all hosts were updated
+        buildah from --name compress-container --security-opt=unmask=/proc/interrupts "$COMPRESSOR_IMAGE"
+
+        BUILDAH_CMD="buildah run ${PREFETCH_MOUNT} --volume /tmp/compress.py:/tmp/compress.py --volume /var/workdir/source:/var/workdir/source --volume ${OUTPUT_DIR}:${OUTPUT_DIR} --workingdir /var/workdir/source --user root:root -- compress-container /bin/sh -c '${PREFETCH_SOURCE} exec python3 /tmp/compress.py'"
+        unshare -Uf "${UNSHARE_ARGS[@]}" --keep-caps -r --map-users 1,1,65536 --map-groups 1,1,65536 -w /var/workdir sh -c "${BUILDAH_CMD}"
+
+        IMAGE_REFERENCE=$(buildah inspect compress-container | jq -r '.FromImage')
+        # FromImage might contain the digest or not. Append the digest if it does not.
+        if [[ ! "${IMAGE_REFERENCE}" =~ "@sha256:" ]]; then
+          IMAGE_REFERENCE+="@$(buildah inspect compress-container | jq -r '.FromImageDigest')"
+        fi
+        echo -n "$IMAGE_REFERENCE" > "$(results.COMPRESSOR_IMAGE_REFERENCE.path)"
+
+        # Verify output directory has content
+        if [ ! "$(ls -A ${OUTPUT_DIR})" ]; then
+          echo "ERROR: Compression script did not produce any output in ${OUTPUT_DIR}"
+          exit 1
+        fi
+
+        echo "Compression complete. Output files:"
+        ls -lh "${OUTPUT_DIR}"
+
+        # buildah requires root owned files, fix permissions
+        chown -R root:root "$OUTPUT_DIR"
+      securityContext:
+        capabilities:
+          add:
+            - SETFCAP
+    - name: push-model
+      image: quay.io/konflux-ci/oras:latest@sha256:e52de03c78ea65bf806cebee6892f054e2ae7b554d302e4a83ef28ec5010b2ee
+      workingDir: /var/workdir
+      volumeMounts:
+        - mountPath: /var/lib/containers
+          name: varlibcontainers
+        - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+          name: trusted-ca
+          readOnly: true
+          subPath: ca-bundle.crt
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        echo "Selecting auth for $IMAGE"
+        select-oci-auth $IMAGE >auth.json
+
+        REPO=${IMAGE%:*}
+        echo "Found that ${REPO} is the repository for ${IMAGE}"
+
+        cat >artifact-manifest.json <<EOL
+        {
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "artifactType": "application/vnd.ai.model.llm.compressed",
+          "config": {
+            "mediaType": "application/vnd.oci.empty.v1+json",
+            "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "size": 2,
+            "data": "e30="
+          },
+          "layers": [],
+          "annotations": {
+            "org.opencontainers.image.created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+        }
+        EOL
+
+        echo "Ensuring that the empty blob exists, for the image manifest config."
+        if ! echo -n "{}" | oras blob push \
+          --registry-config auth.json \
+          ${REPO}@sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a \
+          --media-type application/vnd.oci.empty.v1+json --size 2 -; then
+          echo "Failed to push empty blob to registry"
+          exit 1
+        fi
+
+        # Push each file from the output directory
+        cd "${OUTPUT_DIR}"
+        for filepath in *; do
+          if [ ! -f "$filepath" ]; then
+            continue
+          fi
+
+          relative_path="$filepath"
+          echo "Processing file: $relative_path"
+
+          # Determine media type based on file extension
+          case "$filepath" in
+            *.safetensors)
+              MEDIA_TYPE="application/vnd.ai.model.safetensors"
+              ;;
+            *.json)
+              MEDIA_TYPE="application/vnd.ai.model.config+json"
+              ;;
+            *.bin)
+              MEDIA_TYPE="application/vnd.ai.model.weights"
+              ;;
+            *)
+              MEDIA_TYPE="application/octet-stream"
+              ;;
+          esac
+
+          echo "Pushing blob for ${relative_path} with media type ${MEDIA_TYPE}"
+          if ! oras blob push --registry-config /var/workdir/auth.json "${REPO}" --media-type "${MEDIA_TYPE}" "${filepath}"; then
+            echo "Failed to push blob for ${relative_path} to registry"
+            exit 1
+          fi
+
+          # Get the digest of the file we just pushed
+          DIGEST=$(sha256sum "$filepath" | awk '{print $1}')
+
+          echo "Fetching descriptor for blob sha256:${DIGEST}"
+          if ! oras blob fetch --registry-config /var/workdir/auth.json --descriptor "${REPO}@sha256:${DIGEST}" >/var/workdir/descriptor.json; then
+            echo "Failed to fetch blob descriptor from registry"
+            exit 1
+          fi
+
+          echo "Setting mediaType to ${MEDIA_TYPE}"
+          yq -oj -i '.mediaType = "'${MEDIA_TYPE}'"' /var/workdir/descriptor.json
+
+          echo "Inserting org.opencontainers.image.title = ${relative_path} annotation"
+          yq -oj -i '.annotations."org.opencontainers.image.title" = "'${relative_path}'"' /var/workdir/descriptor.json
+
+          echo "Appending blob descriptor for ${relative_path} to the overall artifact manifest"
+          yq -oj -i ".layers += $(cat /var/workdir/descriptor.json)" /var/workdir/artifact-manifest.json
+
+          echo "Done with ${relative_path}"
+        done
+
+        cd /var/workdir
+
+        echo "Pushing complete artifact manifest to ${IMAGE}"
+        if ! oras manifest push --registry-config auth.json "${IMAGE}" artifact-manifest.json; then
+          echo "Failed to push complete artifact manifest to ${IMAGE}"
+          exit 1
+        fi
+
+        if ! RESULTING_DIGEST=$(oras resolve --registry-config auth.json "${IMAGE}"); then
+          echo "Failed to get digest for ${IMAGE} from registry"
+          exit 1
+        fi
+        echo -n "$RESULTING_DIGEST" | tee "$(results.IMAGE_DIGEST.path)"
+        echo -n "$IMAGE" | tee "$(results.IMAGE_URL.path)"
+        echo -n "${IMAGE}@${RESULTING_DIGEST}" >"$(results.IMAGE_REF.path)"
+      computeResources:
+        limits:
+          memory: 2Gi
+        requests:
+          cpu: 250m
+          memory: 512Mi
+      securityContext:
+        capabilities:
+          add:
+            - SETFCAP
+    - name: sbom-generate
+      image: registry.access.redhat.com/rh-syft-tech-preview/syft-rhel9:1.29.0@sha256:dc0da6b4448428e625271b542cc029ab03de92f75ea50d6d63b1d088d20bbd28
+      workingDir: /var/workdir
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        echo "Generating SBOM for compressed model artifact"
+
+        case $SBOM_TYPE in
+          cyclonedx)
+            syft_sbom_type=cyclonedx-json@1.5 ;;
+          spdx)
+            syft_sbom_type=spdx-json@2.3 ;;
+          *)
+            echo "Invalid SBOM type: $SBOM_TYPE. Valid: cyclonedx, spdx" >&2
+            exit 1
+            ;;
+        esac
+
+        echo "Running syft on the output directory"
+        syft dir:"${OUTPUT_DIR}" --output "$syft_sbom_type"="$(pwd)/sbom.json"
+
+        echo "SBOM generation complete"
+      volumeMounts:
+        - mountPath: /etc/pki/tls/certs/ca-bundle.crt
+          name: trusted-ca
+          readOnly: true
+          subPath: ca-bundle.crt
+    - name: upload-sbom
+      image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+      workingDir: /var/workdir
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        echo "Uploading SBOM to registry"
+
+        ca_bundle=/mnt/trusted-ca/ca-bundle.crt
+        if [ -f "$ca_bundle" ]; then
+          echo "INFO: Using mounted CA bundle: $ca_bundle"
+          cp -vf $ca_bundle /etc/pki/ca-trust/source/anchors
+          update-ca-trust
+        fi
+
+        # Pre-select the correct credentials to work around cosign not supporting the containers-auth.json spec
+        mkdir -p /tmp/auth && select-oci-auth "$(cat "$(results.IMAGE_REF.path)")" > /tmp/auth/config.json
+        export DOCKER_CONFIG=/tmp/auth
+        echo "Attaching SBOM to artifact"
+        if ! cosign attach sbom --sbom sbom.json --type "$SBOM_TYPE" "$(cat "$(results.IMAGE_REF.path)")"
+        then
+            echo "Failed to attach SBOM to registry"
+            exit 1
+        fi
+
+        # Remove tag from IMAGE while allowing registry to contain a port number.
+        sbom_repo="${IMAGE%:*}"
+        sbom_digest="$(sha256sum sbom.json | cut -d' ' -f1)"
+        # The SBOM_BLOB_URL is created by `cosign attach sbom`.
+        echo -n "${sbom_repo}@sha256:${sbom_digest}" | tee "$(results.SBOM_BLOB_URL.path)"
+
+        echo "SBOM upload complete"
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      volumeMounts:
+        - name: trusted-ca
+          mountPath: /mnt/trusted-ca
+          readOnly: true

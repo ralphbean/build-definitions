@@ -1,0 +1,271 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-llm-compressor-oci-ta-hermetic
+spec:
+  description: |
+    Test the llm-compressor-oci-ta task with hermetic mode and cachi2 artifacts
+    to verify environment variables are properly set and network isolation works
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: mock-trusted-artifacts
+      params:
+        - name: ociStorage
+          value: registry-service.kind-registry/oci-ta:latest
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        results:
+        - name: SOURCE_ARTIFACT
+          type: string
+        - name: CACHI2_ARTIFACT
+          type: string
+        workspaces:
+          - name: tests-workspace
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        params:
+          - name: ociStorage
+          - name: caTrustConfigMapName
+          - name: caTrustConfigMapKey
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: mock-source
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # Create a source directory
+              mkdir -p "$(workspaces.tests-workspace.path)/source"
+
+              cat > "$(workspaces.tests-workspace.path)/source/README.md" << 'EOF'
+              # Hermetic Model Compression Test
+              EOF
+
+              echo "Created source directory"
+          - name: mock-cachi2
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # Create a mock cachi2 directory with environment file
+              mkdir -p "$(workspaces.tests-workspace.path)/cachi2/output"
+
+              # Create cachi2.env with Hugging Face environment variables
+              cat > "$(workspaces.tests-workspace.path)/cachi2/cachi2.env" << 'EOF'
+              export HF_HUB_OFFLINE=1
+              export HF_DATASETS_OFFLINE=1
+              export HF_HOME=/cachi2/output/deps/huggingface
+              export TRANSFORMERS_OFFLINE=1
+              export PIP_INDEX_URL=file:///cachi2/output/deps/pip/simple
+              export PIP_FIND_LINKS=/cachi2/output/deps/pip
+              EOF
+
+              # Create mock Hugging Face cache directory
+              mkdir -p "$(workspaces.tests-workspace.path)/cachi2/output/deps/huggingface"
+              echo "mock model cache" > "$(workspaces.tests-workspace.path)/cachi2/output/deps/huggingface/models.txt"
+
+              # Create mock pip dependencies
+              mkdir -p "$(workspaces.tests-workspace.path)/cachi2/output/deps/pip/simple"
+              echo "mock pip cache" > "$(workspaces.tests-workspace.path)/cachi2/output/deps/pip/index.html"
+
+              echo "Created cachi2 directory with environment variables:"
+              cat "$(workspaces.tests-workspace.path)/cachi2/cachi2.env"
+          - name: create-source-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.SOURCE_ARTIFACT.path)=$(workspaces.tests-workspace.path)/source
+          - name: create-cachi2-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.CACHI2_ARTIFACT.path)=$(workspaces.tests-workspace.path)/cachi2
+    - name: run-llm-compressor-task
+      taskRef:
+        name: llm-compressor-oci-ta
+      params:
+        - name: SOURCE_ARTIFACT
+          value: $(tasks.mock-trusted-artifacts.results.SOURCE_ARTIFACT)
+        - name: CACHI2_ARTIFACT
+          value: $(tasks.mock-trusted-artifacts.results.CACHI2_ARTIFACT)
+        - name: IMAGE
+          value: registry-service.kind-registry/test-compressed-model-hermetic:latest
+        - name: COMPRESSOR_IMAGE
+          value: "python:3.11-slim"
+        - name: SCRIPT
+          value: |
+            #!/usr/bin/env python3
+            import os
+            import json
+            import time
+
+            print("Starting mock model compression in hermetic mode...")
+            time.sleep(2)
+
+            output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
+            os.makedirs(output_dir, exist_ok=True)
+
+            # Create mock model files
+            with open(os.path.join(output_dir, "model.safetensors"), "w") as f:
+                f.write("HERMETIC_COMPRESSED_MODEL_" * 50)
+
+            config = {
+                "model_type": "llama",
+                "compressed": True,
+                "hermetic": True,
+                "quantization": {"bits": 4, "scheme": "W4A16"}
+            }
+            with open(os.path.join(output_dir, "config.json"), "w") as f:
+                json.dump(config, f, indent=2)
+
+            # Record environment variables to verify hermetic mode
+            env_info = {
+                "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "NOT_SET"),
+                "HF_DATASETS_OFFLINE": os.environ.get("HF_DATASETS_OFFLINE", "NOT_SET"),
+                "HF_HOME": os.environ.get("HF_HOME", "NOT_SET"),
+                "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE", "NOT_SET"),
+                "PIP_INDEX_URL": os.environ.get("PIP_INDEX_URL", "NOT_SET"),
+            }
+            with open(os.path.join(output_dir, "environment.json"), "w") as f:
+                json.dump(env_info, f, indent=2)
+
+            print(f"Mock hermetic compression complete!")
+            print("Environment variables:")
+            for key, value in env_info.items():
+                print(f"  {key}={value}")
+
+            # Verify required environment variables are set
+            if env_info["HF_HUB_OFFLINE"] != "1":
+                print("WARNING: HF_HUB_OFFLINE is not set to 1")
+            if env_info["HF_DATASETS_OFFLINE"] != "1":
+                print("WARNING: HF_DATASETS_OFFLINE is not set to 1")
+            if env_info["HF_HOME"] == "NOT_SET":
+                print("WARNING: HF_HOME is not set")
+        - name: HERMETIC
+          value: "true"
+        - name: SBOM_TYPE
+          value: "spdx"
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      runAfter:
+        - mock-trusted-artifacts
+    - name: verify-hermetic-execution
+      params:
+        - name: IMAGE_REF
+          value: $(tasks.run-llm-compressor-task.results.IMAGE_REF)
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        params:
+          - name: IMAGE_REF
+          - name: caTrustConfigMapName
+          - name: caTrustConfigMapKey
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: verify-environment-variables
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            env:
+              - name: IMAGE_REF
+                value: $(params.IMAGE_REF)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "Verifying hermetic execution and environment variables..."
+
+              # Remove tag from IMAGE_REF (skopeo doesn't support tag@digest)
+              IMAGE_REF_NO_TAG="${IMAGE_REF%%:*}@${IMAGE_REF##*@}"
+
+              # Extract the environment.json file from the artifact
+              mkdir -p /tmp/artifact
+              cd /tmp/artifact
+
+              # Get the artifact manifest
+              manifest=$(skopeo inspect --raw "docker://${IMAGE_REF_NO_TAG}")
+
+              # Find the environment.json layer
+              env_digest=$(echo "$manifest" | jq -r '.layers[] | select(.annotations."org.opencontainers.image.title" == "environment.json") | .digest')
+
+              if [ -z "$env_digest" ] || [ "$env_digest" = "null" ]; then
+                echo "ERROR: environment.json not found in artifact layers"
+                exit 1
+              fi
+
+              echo "Found environment.json at digest: $env_digest"
+
+              # Extract just the registry/repo part (remove tag and digest from original IMAGE_REF)
+              # IMAGE_REF is like: registry/repo:tag@digest
+              # We want just: registry/repo
+              REPO="${IMAGE_REF%%:*}"
+              echo "Repository: $REPO"
+              echo "Digest: $env_digest"
+
+              # Download the blob
+              oras blob fetch --output environment.json "${REPO}@${env_digest}"
+
+              echo "Environment file contents:"
+              cat environment.json | jq .
+
+              # Verify environment variables were set correctly
+              HF_HUB_OFFLINE=$(jq -r '.HF_HUB_OFFLINE' environment.json)
+              HF_DATASETS_OFFLINE=$(jq -r '.HF_DATASETS_OFFLINE' environment.json)
+              HF_HOME=$(jq -r '.HF_HOME' environment.json)
+
+              if [ "$HF_HUB_OFFLINE" != "1" ]; then
+                echo "ERROR: HF_HUB_OFFLINE should be '1', got '$HF_HUB_OFFLINE'"
+                exit 1
+              fi
+              echo "✓ HF_HUB_OFFLINE is set correctly"
+
+              if [ "$HF_DATASETS_OFFLINE" != "1" ]; then
+                echo "ERROR: HF_DATASETS_OFFLINE should be '1', got '$HF_DATASETS_OFFLINE'"
+                exit 1
+              fi
+              echo "✓ HF_DATASETS_OFFLINE is set correctly"
+
+              if [ "$HF_HOME" = "NOT_SET" ]; then
+                echo "ERROR: HF_HOME should be set"
+                exit 1
+              fi
+              echo "✓ HF_HOME is set to: $HF_HOME"
+
+              echo "Hermetic environment verification complete!"
+      runAfter:
+        - run-llm-compressor-task

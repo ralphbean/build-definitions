@@ -1,0 +1,334 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-llm-compressor-oci-ta-happy-path
+spec:
+  description: |
+    Test the llm-compressor-oci-ta task with a mock compression script to verify successful execution
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: mock-trusted-artifact
+      params:
+        - name: ociStorage
+          value: registry-service.kind-registry/oci-ta:latest
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        results:
+        - name: SOURCE_ARTIFACT
+          type: string
+        workspaces:
+          - name: tests-workspace
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        params:
+          - name: ociStorage
+          - name: caTrustConfigMapName
+          - name: caTrustConfigMapKey
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: mock-source
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # Create a source directory with our mock compression script
+              mkdir -p "$(workspaces.tests-workspace.path)/source"
+
+              # Read the mock compression script from the tests directory
+              # Since we're in a test, we'll embed it directly
+              cat > "$(workspaces.tests-workspace.path)/source/compress.py" << 'EOF'
+              #!/usr/bin/env python3
+              import os
+              import json
+              import time
+
+              print("Starting mock model compression...")
+              time.sleep(2)
+
+              output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
+              os.makedirs(output_dir, exist_ok=True)
+
+              # Create mock model files
+              with open(os.path.join(output_dir, "model.safetensors"), "w") as f:
+                  f.write("MOCK_COMPRESSED_MODEL_WEIGHTS_" * 50)
+
+              config = {
+                  "model_type": "llama",
+                  "compressed": True,
+                  "quantization": {"bits": 4, "scheme": "W4A16"}
+              }
+              with open(os.path.join(output_dir, "config.json"), "w") as f:
+                  json.dump(config, f, indent=2)
+
+              tokenizer = {"vocab_size": 32000}
+              with open(os.path.join(output_dir, "tokenizer.json"), "w") as f:
+                  json.dump(tokenizer, f, indent=2)
+
+              print(f"Mock compression complete! Files created in {output_dir}")
+              for filename in os.listdir(output_dir):
+                  print(f"  - {filename}")
+              EOF
+
+              chmod +x "$(workspaces.tests-workspace.path)/source/compress.py"
+
+              # Create a README to make the source directory look realistic
+              cat > "$(workspaces.tests-workspace.path)/source/README.md" << 'EOF'
+              # Test Model Compression
+
+              This is a test repository for llm-compressor-oci-ta task.
+              EOF
+
+              echo "Created source directory with test files:"
+              ls -la "$(workspaces.tests-workspace.path)/source"
+          - name: create-trusted-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.SOURCE_ARTIFACT.path)=$(workspaces.tests-workspace.path)/source
+    - name: run-llm-compressor-task
+      taskRef:
+        name: llm-compressor-oci-ta
+      params:
+        - name: SOURCE_ARTIFACT
+          value: $(tasks.mock-trusted-artifact.results.SOURCE_ARTIFACT)
+        - name: CACHI2_ARTIFACT
+          value: ""
+        - name: IMAGE
+          value: registry-service.kind-registry/test-compressed-model:latest
+        - name: COMPRESSOR_IMAGE
+          value: "python:3.11-slim"
+        - name: SCRIPT
+          value: |
+            #!/usr/bin/env python3
+            import os
+            import json
+            import time
+
+            print("Starting mock model compression...")
+            time.sleep(2)
+
+            output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
+            os.makedirs(output_dir, exist_ok=True)
+
+            # Create mock model files
+            with open(os.path.join(output_dir, "model.safetensors"), "w") as f:
+                f.write("MOCK_COMPRESSED_MODEL_WEIGHTS_" * 50)
+
+            config = {
+                "model_type": "llama",
+                "compressed": True,
+                "quantization": {"bits": 4, "scheme": "W4A16"}
+            }
+            with open(os.path.join(output_dir, "config.json"), "w") as f:
+                json.dump(config, f, indent=2)
+
+            tokenizer = {"vocab_size": 32000}
+            with open(os.path.join(output_dir, "tokenizer.json"), "w") as f:
+                json.dump(tokenizer, f, indent=2)
+
+            print(f"Mock compression complete! Files created in {output_dir}")
+            for filename in os.listdir(output_dir):
+                print(f"  - {filename}")
+        - name: HERMETIC
+          value: "true"
+        - name: SBOM_TYPE
+          value: "spdx"
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      runAfter:
+        - mock-trusted-artifact
+    - name: verify-llm-compressor-result
+      params:
+        - name: IMAGE_DIGEST
+          value: $(tasks.run-llm-compressor-task.results.IMAGE_DIGEST)
+        - name: IMAGE_REF
+          value: $(tasks.run-llm-compressor-task.results.IMAGE_REF)
+        - name: IMAGE_URL
+          value: $(tasks.run-llm-compressor-task.results.IMAGE_URL)
+        - name: SBOM_BLOB_URL
+          value: $(tasks.run-llm-compressor-task.results.SBOM_BLOB_URL)
+        - name: COMPRESSOR_IMAGE_REFERENCE
+          value: $(tasks.run-llm-compressor-task.results.COMPRESSOR_IMAGE_REFERENCE)
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        params:
+          - name: IMAGE_DIGEST
+          - name: IMAGE_REF
+          - name: IMAGE_URL
+          - name: SBOM_BLOB_URL
+          - name: COMPRESSOR_IMAGE_REFERENCE
+          - name: caTrustConfigMapName
+          - name: caTrustConfigMapKey
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: check-results-not-empty
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            env:
+              - name: IMAGE_DIGEST
+                value: $(params.IMAGE_DIGEST)
+              - name: IMAGE_REF
+                value: $(params.IMAGE_REF)
+              - name: IMAGE_URL
+                value: $(params.IMAGE_URL)
+              - name: SBOM_BLOB_URL
+                value: $(params.SBOM_BLOB_URL)
+              - name: COMPRESSOR_IMAGE_REFERENCE
+                value: $(params.COMPRESSOR_IMAGE_REFERENCE)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "Verifying all results are populated..."
+
+              if [ -z "$IMAGE_DIGEST" ]; then
+                echo "ERROR: IMAGE_DIGEST is empty"
+                exit 1
+              fi
+              echo "✓ IMAGE_DIGEST: $IMAGE_DIGEST"
+
+              if [ -z "$IMAGE_REF" ]; then
+                echo "ERROR: IMAGE_REF is empty"
+                exit 1
+              fi
+              echo "✓ IMAGE_REF: $IMAGE_REF"
+
+              if [ -z "$IMAGE_URL" ]; then
+                echo "ERROR: IMAGE_URL is empty"
+                exit 1
+              fi
+              echo "✓ IMAGE_URL: $IMAGE_URL"
+
+              if [ -z "$SBOM_BLOB_URL" ]; then
+                echo "ERROR: SBOM_BLOB_URL is empty"
+                exit 1
+              fi
+              echo "✓ SBOM_BLOB_URL: $SBOM_BLOB_URL"
+
+              if [ -z "$COMPRESSOR_IMAGE_REFERENCE" ]; then
+                echo "ERROR: COMPRESSOR_IMAGE_REFERENCE is empty"
+                exit 1
+              fi
+              echo "✓ COMPRESSOR_IMAGE_REFERENCE: $COMPRESSOR_IMAGE_REFERENCE"
+
+              echo "All results are populated correctly!"
+          - name: check-artifact-exists
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            env:
+              - name: IMAGE_REF
+                value: $(params.IMAGE_REF)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "Verifying compressed model artifact was pushed to registry..."
+
+              # Remove tag from IMAGE_REF (skopeo doesn't support tag@digest)
+              IMAGE_REF_NO_TAG="${IMAGE_REF%%:*}@${IMAGE_REF##*@}"
+
+              if ! skopeo inspect --raw "docker://${IMAGE_REF_NO_TAG}"; then
+                echo "ERROR: Cannot inspect artifact at ${IMAGE_REF_NO_TAG}"
+                exit 1
+              fi
+
+              echo "✓ Artifact exists and is accessible"
+
+              # Check artifact type
+              artifactType=$(skopeo inspect --raw "docker://${IMAGE_REF_NO_TAG}" | jq -r '.artifactType')
+              echo "Artifact type: $artifactType"
+
+              if [ "$artifactType" != "application/vnd.ai.model.llm.compressed" ]; then
+                echo "ERROR: Expected artifactType 'application/vnd.ai.model.llm.compressed', got '$artifactType'"
+                exit 1
+              fi
+
+              echo "✓ Artifact type is correct"
+
+              # Check that we have layers (the compressed model files)
+              layerCount=$(skopeo inspect --raw "docker://${IMAGE_REF_NO_TAG}" | jq '.layers | length')
+              echo "Number of layers: $layerCount"
+
+              if [ "$layerCount" -lt 1 ]; then
+                echo "ERROR: Expected at least 1 layer, got $layerCount"
+                exit 1
+              fi
+
+              echo "✓ Artifact has expected layers"
+
+              echo "Artifact verification complete!"
+          - name: check-sbom-exists
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            env:
+              - name: IMAGE_REF
+                value: $(params.IMAGE_REF)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "Verifying SBOM was attached to artifact..."
+
+              # Remove tag from IMAGE_REF (cosign also doesn't support tag@digest)
+              IMAGE_REF_NO_TAG="${IMAGE_REF%%:*}@${IMAGE_REF##*@}"
+
+              if ! cosign download sbom "$IMAGE_REF_NO_TAG" > sbom.json; then
+                echo "ERROR: Cannot download SBOM for ${IMAGE_REF_NO_TAG}"
+                exit 1
+              fi
+
+              echo "✓ SBOM downloaded successfully"
+
+              # Verify it's valid JSON
+              if ! jq . sbom.json > /dev/null; then
+                echo "ERROR: SBOM is not valid JSON"
+                exit 1
+              fi
+
+              echo "✓ SBOM is valid JSON"
+
+              # Check for expected SBOM format (SPDX)
+              if jq -e '.spdxVersion' sbom.json > /dev/null; then
+                echo "✓ SBOM is in SPDX format"
+              elif jq -e '.bomFormat == "CycloneDX"' sbom.json > /dev/null; then
+                echo "✓ SBOM is in CycloneDX format"
+              else
+                echo "ERROR: SBOM format not recognized"
+                exit 1
+              fi
+
+              echo "SBOM verification complete!"
+      runAfter:
+        - run-llm-compressor-task
