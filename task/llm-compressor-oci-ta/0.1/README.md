@@ -25,6 +25,7 @@ This task allows data scientists to compress LLM models as part of a Konflux bui
 | STORAGE_DRIVER | Buildah storage driver | vfs | No |
 | caTrustConfigMapName | ConfigMap name for CA bundle | trusted-ca | No |
 | caTrustConfigMapKey | Key in ConfigMap for CA bundle | ca-bundle.crt | No |
+| BUILDAH_DEVICES | Device specifications for GPU/accelerator access | [] | No |
 
 ## Results
 
@@ -82,6 +83,54 @@ oneshot(
 
 print(f"Model compressed and saved to {output_dir}")
 ```
+
+## GPU and Accelerator Support
+
+The task supports passing GPU and accelerator devices to the compression container using the `BUILDAH_DEVICES` parameter. This is useful when compression algorithms require GPU acceleration.
+
+### Device Specifications
+
+The `BUILDAH_DEVICES` parameter accepts an array of device specifications. Each device spec is validated to ensure it contains only safe characters (alphanumeric, `/`, `.`, `=`, `:`, `-`).
+
+When devices are specified, the task automatically adds `--security-opt=label=disable` to allow device access within the nested container.
+
+### Supported Device Types
+
+**NVIDIA GPUs** (using NVIDIA Container Runtime):
+```yaml
+- name: BUILDAH_DEVICES
+  value:
+    - "nvidia.com/gpu=all"
+```
+
+**AMD GPUs**:
+```yaml
+- name: BUILDAH_DEVICES
+  value:
+    - "/dev/dri"
+```
+
+**Intel GPUs**:
+```yaml
+- name: BUILDAH_DEVICES
+  value:
+    - "/dev/dri"
+```
+
+**Multiple devices**:
+```yaml
+- name: BUILDAH_DEVICES
+  value:
+    - "nvidia.com/gpu=all"
+    - "/dev/other-device"
+```
+
+### Node Requirements
+
+To use GPU devices:
+- The Kubernetes node must have the appropriate GPU hardware
+- The node must have the necessary device drivers installed (e.g., NVIDIA drivers)
+- For NVIDIA GPUs, the node should have the NVIDIA Container Runtime configured
 
 ## Usage Example
 
@@ -153,6 +202,10 @@ print(f"Model compressed and saved to {output_dir}")
       value: "scripts/compress_model.py"
     - name: HERMETIC
       value: "true"
+    # Optional: Enable GPU support
+    - name: BUILDAH_DEVICES
+      value:
+        - "nvidia.com/gpu=all"
   runAfter:
     - prefetch-dependencies
   taskRef:

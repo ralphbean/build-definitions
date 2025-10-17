@@ -55,6 +55,10 @@ spec:
       description: The name of the key in the ConfigMap that contains the CA bundle data.
       type: string
       default: ca-bundle.crt
+    - name: BUILDAH_DEVICES
+      description: Array of device specifications to pass to buildah run (e.g., "nvidia.com/gpu=all" for NVIDIA GPUs, "/dev/dri" for AMD/Intel GPUs). Only alphanumeric, slash, dot, equals, colon, and dash characters allowed.
+      type: array
+      default: []
   results:
     - name: IMAGE_DIGEST
       description: Digest of the compressed model artifact just pushed
@@ -127,6 +131,8 @@ spec:
           value: $(params.COMPRESSOR_IMAGE)
         - name: STORAGE_DRIVER
           value: $(params.STORAGE_DRIVER)
+      args:
+        - $(params.BUILDAH_DEVICES[*])
       script: |
         #!/bin/bash
         set -euo pipefail
@@ -179,6 +185,23 @@ spec:
           PREFETCH_SOURCE=". /cachi2/cachi2.env &&"
         fi
 
+        # Parse and validate BUILDAH_DEVICES array
+        DEVICE_FLAGS=()
+        for device in "$@"; do
+          # Validate device spec format (only allow safe characters)
+          if [[ ! "$device" =~ ^[a-zA-Z0-9/._=:-]+$ ]]; then
+            echo "ERROR: Invalid device spec: $device"
+            echo "Device specs must contain only alphanumeric, /, ., =, :, - characters"
+            exit 1
+          fi
+          DEVICE_FLAGS+=(--device "$device")
+        done
+
+        # Add security-opt when devices are present (GPUs typically need this)
+        if [ ${#DEVICE_FLAGS[@]} -gt 0 ]; then
+          DEVICE_FLAGS+=(--security-opt=label=disable)
+        fi
+
         # Copy the compression script from source
         if [ ! -f "/var/workdir/source/${SCRIPT}" ]; then
           echo "ERROR: Script not found: /var/workdir/source/${SCRIPT}"
@@ -201,6 +224,11 @@ spec:
         BUILDAH_ARGS=(
           "buildah" "run"
         )
+
+        # Add device flags if provided
+        if [ ${#DEVICE_FLAGS[@]} -gt 0 ]; then
+          BUILDAH_ARGS+=("${DEVICE_FLAGS[@]}")
+        fi
 
         # Add prefetch mount if available
         if [ -n "$PREFETCH_MOUNT" ]; then
