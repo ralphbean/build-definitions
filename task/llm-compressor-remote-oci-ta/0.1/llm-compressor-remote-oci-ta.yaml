@@ -338,14 +338,18 @@ spec:
       REMOTESSHEOF
       chmod +x scripts/script-compress-model.sh
 
+      echo "[$(date --utc -Ins)] Platform: $PLATFORM"
       PODMAN_NVIDIA_ARGS=()
       if [[ "$PLATFORM" == "linux-g"* ]]; then
+          echo "[$(date --utc -Ins)] GPU platform detected, adding GPU device arguments"
           PODMAN_NVIDIA_ARGS+=("--device=nvidia.com/gpu=all" "--security-opt=label=disable")
       fi
+      echo "[$(date --utc -Ins)] GPU arguments: ${PODMAN_NVIDIA_ARGS[@]:-none}"
 
       if ! [[ $IS_LOCALHOST ]]; then
         rsync -ra scripts "$SSH_HOST:$BUILD_DIR"
         echo "[$(date --utc -Ins)] Execute compression via ssh"
+        echo "[$(date --utc -Ins)] Podman command: podman run ${PODMAN_NVIDIA_ARGS[@]:-} ... ${BUILDER_IMAGE} /scripts/script-compress-model.sh"
         # shellcheck disable=SC2086
         # Please note: all variables below the first ssh line must be quoted with ${var@Q}!
         # See https://stackoverflow.com/questions/6592376/prevent-ssh-from-breaking-up-shell-script-parameters
@@ -368,9 +372,10 @@ spec:
         rsync -razW --stats "$SSH_HOST:$BUILD_DIR/volumes/trusted-ca/" /mnt/trusted-ca/
         rsync -razW --stats "$SSH_HOST:$BUILD_DIR/results/" "/tekton/results/"
       else
+        echo "[$(date --utc -Ins)] Executing compression locally (localhost mode)"
         bash scripts/script-compress-model.sh "$@"
       fi
-      echo "Compression on remote host $SSH_HOST finished"
+      echo "[$(date --utc -Ins)] Compression on remote host $SSH_HOST finished"
 
       echo "[$(date --utc -Ins)] End remote"
     securityContext:

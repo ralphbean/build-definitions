@@ -218,10 +218,13 @@ if ! [[ $IS_LOCALHOST ]]; then
 		ret += step.Script
 		ret += "\nREMOTESSHEOF"
 		ret += "\nchmod +x " + script + "\n"
+		ret += "\necho \"[$(date --utc -Ins)] Platform: $PLATFORM\""
 		ret += "\nPODMAN_NVIDIA_ARGS=()"
 		ret += "\nif [[ \"$PLATFORM\" == \"linux-g\"* ]]; then"
+		ret += "\n    echo \"[$(date --utc -Ins)] GPU platform detected, adding GPU device arguments\""
 		ret += "\n    PODMAN_NVIDIA_ARGS+=(\"--device=nvidia.com/gpu=all\" \"--security-opt=label=disable\")"
-		ret += "\nfi\n"
+		ret += "\nfi"
+		ret += "\necho \"[$(date --utc -Ins)] GPU arguments: ${PODMAN_NVIDIA_ARGS[@]:-none}\"\n"
 
 		if task.Spec.StepTemplate != nil {
 			for _, e := range task.Spec.StepTemplate.Env {
@@ -236,6 +239,7 @@ if ! [[ $IS_LOCALHOST ]]; then
 		}
 		ret += "\n  echo \"[$(date --utc -Ins)] Execute compression via ssh\""
 		podmanArgs += "    -v \"${BUILD_DIR@Q}/scripts:/scripts:Z\" \\\n"
+		ret += "\n  echo \"[$(date --utc -Ins)] Podman command: podman run ${PODMAN_NVIDIA_ARGS[@]:-} ... ${BUILDER_IMAGE} /" + containerScript + "\""
 		ret += "\n  # shellcheck disable=SC2086"
 		ret += "\n  # Please note: all variables below the first ssh line must be quoted with ${var@Q}!"
 		ret += "\n  # See https://stackoverflow.com/questions/6592376/prevent-ssh-from-breaking-up-shell-script-parameters"
@@ -256,9 +260,10 @@ if ! [[ $IS_LOCALHOST ]]; then
 
 		ret += `
 else
+  echo "[$(date --utc -Ins)] Executing compression locally (localhost mode)"
   bash ` + containerScript + ` "$@"
 fi
-echo "Compression on remote host $SSH_HOST finished"
+echo "[$(date --utc -Ins)] Compression on remote host $SSH_HOST finished"
 
 echo "[$(date --utc -Ins)] End remote"`
 
