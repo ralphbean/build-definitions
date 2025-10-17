@@ -1,0 +1,615 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  annotations:
+    tekton.dev/pipelines.minVersion: 0.12.1
+    tekton.dev/tags: image-build, konflux, llm, model-compression
+  creationTimestamp: null
+  labels:
+    app.kubernetes.io/version: "0.1"
+    build.appstudio.redhat.com/build_type: llm-compression
+  name: llm-compressor-remote-oci-ta
+spec:
+  description: |-
+    Compresses large language models using llm-compressor from the vllm project and pushes the
+    compressed model to an OCI registry. The task executes user-provided compression scripts
+    (Python or shell) in a hermetic environment with optional cachi2-prefetched dependencies.
+  params:
+  - description: The Trusted Artifact URI pointing to the artifact with the application
+      source code.
+    name: SOURCE_ARTIFACT
+    type: string
+  - default: ""
+    description: The Trusted Artifact URI pointing to the artifact with the prefetched
+      dependencies.
+    name: CACHI2_ARTIFACT
+    type: string
+  - description: Reference of the OCI artifact where the compressed model will be
+      pushed
+    name: IMAGE
+    type: string
+  - description: Container image with llm-compressor and dependencies installed
+    name: COMPRESSOR_IMAGE
+    type: string
+  - description: Path to the compression script relative to the source root (e.g.,
+      "scripts/compress.py" or "scripts/compress.sh")
+    name: SCRIPT
+    type: string
+  - default: "true"
+    description: Execute compression without network access
+    name: HERMETIC
+    type: string
+  - default: /var/workdir/output
+    description: Directory where the compression script writes output files
+    name: OUTPUT_DIR
+    type: string
+  - default: spdx
+    description: 'Select the SBOM format to generate. Valid values: spdx, cyclonedx.'
+    name: SBOM_TYPE
+    type: string
+  - default: vfs
+    description: Storage driver to configure for buildah
+    name: STORAGE_DRIVER
+    type: string
+  - default: trusted-ca
+    description: The name of the ConfigMap to read CA bundle data from.
+    name: caTrustConfigMapName
+    type: string
+  - default: ca-bundle.crt
+    description: The name of the key in the ConfigMap that contains the CA bundle
+      data.
+    name: caTrustConfigMapKey
+    type: string
+  - default: []
+    description: Array of device specifications to pass to buildah run (e.g., "nvidia.com/gpu=all"
+      for NVIDIA GPUs, "/dev/dri" for AMD/Intel GPUs). Only alphanumeric, slash, dot,
+      equals, colon, and dash characters allowed.
+    name: BUILDAH_DEVICES
+    type: array
+  - description: The platform to build on
+    name: PLATFORM
+    type: string
+  - default: "false"
+    description: Whether to append a sanitized platform architecture on the IMAGE
+      tag
+    name: IMAGE_APPEND_PLATFORM
+    type: string
+  results:
+  - description: Digest of the compressed model artifact just pushed
+    name: IMAGE_DIGEST
+  - description: Repository where the compressed model artifact was pushed
+    name: IMAGE_URL
+  - description: Image reference of the compressed model artifact with digest
+    name: IMAGE_REF
+  - description: Reference of SBOM blob digest to enable digest-based verification
+      from provenance
+    name: SBOM_BLOB_URL
+    type: string
+  - description: Reference and digest of the image used to run compression. Suitable
+      to pass to buildah ADDITIONAL_BASE_IMAGES
+    name: COMPRESSOR_IMAGE_REFERENCE
+    type: string
+  stepTemplate:
+    computeResources:
+      limits:
+        memory: 4Gi
+      requests:
+        cpu: "1"
+        memory: 1Gi
+    env:
+    - name: HERMETIC
+      value: $(params.HERMETIC)
+    - name: IMAGE
+      value: $(params.IMAGE)
+    - name: OUTPUT_DIR
+      value: $(params.OUTPUT_DIR)
+    - name: SBOM_TYPE
+      value: $(params.SBOM_TYPE)
+    - name: BUILDER_IMAGE
+      value: quay.io/konflux-ci/buildah-task:latest@sha256:c8d667a4efa2f05e73e2ac36b55928633d78857589165bd919d2628812d7ffcb
+    - name: PLATFORM
+      value: $(params.PLATFORM)
+    - name: IMAGE_APPEND_PLATFORM
+      value: $(params.IMAGE_APPEND_PLATFORM)
+    volumeMounts:
+    - mountPath: /var/workdir
+      name: workdir
+  steps:
+  - args:
+    - use
+    - $(params.SOURCE_ARTIFACT)=/var/workdir/source
+    - $(params.CACHI2_ARTIFACT)=/var/workdir/cachi2
+    computeResources: {}
+    image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+    name: use-trusted-artifact
+    volumeMounts:
+    - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+      name: trusted-ca
+      readOnly: true
+      subPath: ca-bundle.crt
+  - args:
+    - $(params.BUILDAH_DEVICES[*])
+    computeResources: {}
+    env:
+    - name: SCRIPT
+      value: $(params.SCRIPT)
+    - name: COMPRESSOR_IMAGE
+      value: $(params.COMPRESSOR_IMAGE)
+    - name: STORAGE_DRIVER
+      value: $(params.STORAGE_DRIVER)
+    image: quay.io/konflux-ci/buildah-task:latest@sha256:c8d667a4efa2f05e73e2ac36b55928633d78857589165bd919d2628812d7ffcb
+    name: compress-model
+    script: |-
+      #!/bin/bash
+      set -e
+      set -o verbose
+
+      echo "[$(date --utc -Ins)] Prepare connection"
+
+      mkdir -p ~/.ssh
+      if [ -e "/ssh/error" ]; then
+        #no server could be provisioned
+        cat /ssh/error
+        exit 1
+      fi
+      export SSH_HOST=$(cat /ssh/host)
+
+      if [ "$SSH_HOST" == "localhost" ] ; then
+        IS_LOCALHOST=true
+        echo "Localhost detected; running compression in cluster"
+      elif [ -e "/ssh/otp" ]; then
+        curl --cacert /ssh/otp-ca -XPOST -d @/ssh/otp $(cat /ssh/otp-server) >~/.ssh/id_rsa
+        echo "" >> ~/.ssh/id_rsa
+      else
+        cp /ssh/id_rsa ~/.ssh
+      fi
+
+      mkdir -p scripts
+
+      if ! [[ $IS_LOCALHOST ]]; then
+        echo "[$(date --utc -Ins)] Setup VM"
+
+        chmod 0400 ~/.ssh/id_rsa
+        export BUILD_DIR=$(cat /ssh/user-dir)
+        export SSH_ARGS="-o StrictHostKeyChecking=no -o ServerAliveInterval=60 -o ServerAliveCountMax=10"
+        echo "$BUILD_DIR"
+        # shellcheck disable=SC2086
+        ssh $SSH_ARGS "$SSH_HOST"  mkdir -p "${BUILD_DIR@Q}/workspaces" "${BUILD_DIR@Q}/scripts" "${BUILD_DIR@Q}/volumes"
+
+        echo "[$(date --utc -Ins)] Rsync data"
+
+        rsync -razW /var/workdir/ "$SSH_HOST:$BUILD_DIR/workspaces/workdir/"
+        rsync -razW /mnt/trusted-ca/ "$SSH_HOST:$BUILD_DIR/volumes/trusted-ca/"
+        rsync -razW  "$HOME/.docker/" "$SSH_HOST:$BUILD_DIR/.docker/"
+        rsync -razW  --mkpath "/usr/bin/retry" "$SSH_HOST:$BUILD_DIR/usr/bin/retry"
+        rsync -razW  "/tekton/results/" "$SSH_HOST:$BUILD_DIR/results/"
+      fi
+
+      if [ "${IMAGE_APPEND_PLATFORM}" == "true" ]; then
+        IMAGE="${IMAGE}-${PLATFORM//[^a-zA-Z0-9]/-}"
+        export IMAGE
+      fi
+
+      cat >scripts/script-compress-model.sh <<'REMOTESSHEOF'
+      #!/bin/bash
+      set -euo pipefail
+      cd /var/workdir
+
+      ca_bundle=/mnt/trusted-ca/ca-bundle.crt
+      if [ -f "$ca_bundle" ]; then
+        echo "INFO: Using mounted CA bundle: $ca_bundle"
+        cp -vf $ca_bundle /etc/pki/ca-trust/source/anchors
+        update-ca-trust
+      fi
+
+      # Fixing group permission on /var/lib/containers
+      chown root:root /var/lib/containers
+
+      sed -i 's/^\s*short-name-mode\s*=\s*.*/short-name-mode = "disabled"/' /etc/containers/registries.conf
+
+      # Setting new namespace to run buildah - 2^32-2
+      echo 'root:1:4294967294' | tee -a /etc/subuid >>/etc/subgid
+
+      UNSHARE_ARGS=()
+      if [ "${HERMETIC}" == "true" ]; then
+        echo "The compression will be executed with network isolation"
+        UNSHARE_ARGS+=("--net")
+      fi
+
+      # Validate OUTPUT_DIR doesn't contain shell metacharacters
+      if [[ "$OUTPUT_DIR" =~ [';|&$`<>'] ]]; then
+        echo "ERROR: OUTPUT_DIR contains invalid characters: $OUTPUT_DIR"
+        exit 1
+      fi
+
+      # Validate OUTPUT_DIR is within /var/workdir
+      REAL_OUTPUT_DIR="$(realpath -m "$OUTPUT_DIR")"
+      if [[ "${REAL_OUTPUT_DIR}" != /var/workdir/* ]]; then
+        echo "ERROR: OUTPUT_DIR must be within /var/workdir: ${REAL_OUTPUT_DIR}"
+        exit 1
+      fi
+
+      # Validate SCRIPT path doesn't escape source directory
+      REAL_SCRIPT_PATH="$(realpath -m "/var/workdir/source/${SCRIPT}")"
+      if [[ "${REAL_SCRIPT_PATH}" != /var/workdir/source/* ]]; then
+        echo "ERROR: SCRIPT path escapes source directory: ${REAL_SCRIPT_PATH}"
+        exit 1
+      fi
+
+      PREFETCH_MOUNT=""
+      PREFETCH_SOURCE=""
+      if [ -d "/var/workdir/cachi2" ]; then
+        PREFETCH_MOUNT="--volume /var/workdir/cachi2:/cachi2"
+        PREFETCH_SOURCE=". /cachi2/cachi2.env &&"
+      fi
+
+      # Parse and validate BUILDAH_DEVICES array
+      DEVICE_FLAGS=()
+      for device in "$@"; do
+        # Validate device spec format (only allow safe characters)
+        if [[ ! "$device" =~ ^[a-zA-Z0-9/._=:-]+$ ]]; then
+          echo "ERROR: Invalid device spec: $device"
+          echo "Device specs must contain only alphanumeric, /, ., =, :, - characters"
+          exit 1
+        fi
+        DEVICE_FLAGS+=(--device "$device")
+      done
+
+      # Add security-opt when devices are present (GPUs typically need this)
+      if [ ${#DEVICE_FLAGS[@]} -gt 0 ]; then
+        DEVICE_FLAGS+=(--security-opt=label=disable)
+      fi
+
+      # Copy the compression script from source
+      if [ ! -f "/var/workdir/source/${SCRIPT}" ]; then
+        echo "ERROR: Script not found: /var/workdir/source/${SCRIPT}"
+        exit 1
+      fi
+
+      # Preserve the original filename to support both .py and .sh scripts
+      SCRIPT_BASENAME=$(basename "${SCRIPT}")
+      cp "/var/workdir/source/${SCRIPT}" "/tmp/${SCRIPT_BASENAME}"
+      chmod +x "/tmp/${SCRIPT_BASENAME}"
+
+      mkdir -p "$OUTPUT_DIR"
+
+      # "--security-opt=unmask=/proc/interrupts" is necessary for newer version of buildah if the host system does not contain up to date version of container-selinux
+      # TODO remove the option once all hosts were updated
+      buildah from --name compress-container --security-opt=unmask=/proc/interrupts "$COMPRESSOR_IMAGE"
+
+      # Execute the script using its shebang (supports both .py and .sh scripts)
+      # Build command safely using array to avoid shell injection
+      BUILDAH_ARGS=(
+        "buildah" "run"
+      )
+
+      # Add device flags if provided
+      if [ ${#DEVICE_FLAGS[@]} -gt 0 ]; then
+        BUILDAH_ARGS+=("${DEVICE_FLAGS[@]}")
+      fi
+
+      # Add prefetch mount if available
+      if [ -n "$PREFETCH_MOUNT" ]; then
+        BUILDAH_ARGS+=("--volume" "/var/workdir/cachi2:/cachi2")
+      fi
+
+      # Add remaining volume mounts with proper quoting
+      BUILDAH_ARGS+=(
+        "--volume" "/tmp/${SCRIPT_BASENAME}:/tmp/${SCRIPT_BASENAME}"
+        "--volume" "/var/workdir/source:/var/workdir/source"
+        "--volume" "${OUTPUT_DIR}:${OUTPUT_DIR}"
+        "--workingdir" "/var/workdir/source"
+        "--user" "root:root"
+        "--" "compress-container"
+        "/bin/sh" "-c"
+      )
+
+      # Build inner command safely
+      if [ -n "$PREFETCH_SOURCE" ]; then
+        INNER_CMD=". /cachi2/cachi2.env && /tmp/${SCRIPT_BASENAME}"
+      else
+        INNER_CMD="/tmp/${SCRIPT_BASENAME}"
+      fi
+
+      BUILDAH_ARGS+=("$INNER_CMD")
+
+      # Execute without outer sh -c wrapper to prevent injection
+      unshare -Uf "${UNSHARE_ARGS[@]}" --keep-caps -r --map-users 1,1,65536 --map-groups 1,1,65536 -w /var/workdir "${BUILDAH_ARGS[@]}"
+
+      IMAGE_REFERENCE=$(buildah inspect compress-container | jq -r '.FromImage')
+      # FromImage might contain the digest or not. Append the digest if it does not.
+      if [[ ! "${IMAGE_REFERENCE}" =~ "@sha256:" ]]; then
+        IMAGE_REFERENCE+="@$(buildah inspect compress-container | jq -r '.FromImageDigest')"
+      fi
+      echo -n "$IMAGE_REFERENCE" > "$(results.COMPRESSOR_IMAGE_REFERENCE.path)"
+
+      # Verify output directory has content
+      if [ ! "$(ls -A ${OUTPUT_DIR})" ]; then
+        echo "ERROR: Compression script did not produce any output in ${OUTPUT_DIR}"
+        exit 1
+      fi
+
+      echo "Compression complete. Output files:"
+      ls -lh "${OUTPUT_DIR}"
+
+      # buildah requires root owned files, fix permissions
+      chown -R root:root "$OUTPUT_DIR"
+
+      REMOTESSHEOF
+      chmod +x scripts/script-compress-model.sh
+
+      PODMAN_NVIDIA_ARGS=()
+      if [[ "$PLATFORM" == "linux-g"* ]]; then
+          PODMAN_NVIDIA_ARGS+=("--device=nvidia.com/gpu=all" "--security-opt=label=disable")
+      fi
+
+      if ! [[ $IS_LOCALHOST ]]; then
+        rsync -ra scripts "$SSH_HOST:$BUILD_DIR"
+        echo "[$(date --utc -Ins)] Execute compression via ssh"
+        # shellcheck disable=SC2086
+        # Please note: all variables below the first ssh line must be quoted with ${var@Q}!
+        # See https://stackoverflow.com/questions/6592376/prevent-ssh-from-breaking-up-shell-script-parameters
+        ssh $SSH_ARGS "$SSH_HOST" podman run     -e HERMETIC="${HERMETIC@Q}" \
+          -e IMAGE="${IMAGE@Q}" \
+          -e OUTPUT_DIR="${OUTPUT_DIR@Q}" \
+          -e SBOM_TYPE="${SBOM_TYPE@Q}" \
+          -e SCRIPT="${SCRIPT@Q}" \
+          -e COMPRESSOR_IMAGE="${COMPRESSOR_IMAGE@Q}" \
+          -e STORAGE_DRIVER="${STORAGE_DRIVER@Q}" \
+          -v "${BUILD_DIR@Q}/workspaces/workdir:/var/workdir:Z" \
+          -v "${BUILD_DIR@Q}/volumes/trusted-ca:/mnt/trusted-ca:Z" \
+          -v "${BUILD_DIR@Q}/.docker/:/root/.docker:Z" \
+          -v "${BUILD_DIR@Q}/usr/bin/retry:/usr/bin/retry:Z" \
+          -v "${BUILD_DIR@Q}/results/:/tekton/results:Z" \
+          -v "${BUILD_DIR@Q}/scripts:/scripts:Z" \
+          --user=0 "${PODMAN_NVIDIA_ARGS[@]@Q}" --rm "${BUILDER_IMAGE@Q}" /scripts/script-compress-model.sh "${@@Q}"
+        echo "[$(date --utc -Ins)] Rsync back"
+        rsync -razW --stats "$SSH_HOST:$BUILD_DIR/workspaces/workdir/" /var/workdir/
+        rsync -razW --stats "$SSH_HOST:$BUILD_DIR/volumes/trusted-ca/" /mnt/trusted-ca/
+        rsync -razW --stats "$SSH_HOST:$BUILD_DIR/results/" "/tekton/results/"
+      else
+        bash scripts/script-compress-model.sh "$@"
+      fi
+      echo "Compression on remote host $SSH_HOST finished"
+
+      echo "[$(date --utc -Ins)] End remote"
+    securityContext:
+      capabilities:
+        add:
+        - SETFCAP
+    volumeMounts:
+    - mountPath: /mnt/trusted-ca
+      name: trusted-ca
+      readOnly: true
+    - mountPath: /var/lib/containers
+      name: varlibcontainers
+    - mountPath: /ssh
+      name: ssh
+      readOnly: true
+    workingDir: /var/workdir
+  - computeResources:
+      limits:
+        memory: 2Gi
+      requests:
+        cpu: 250m
+        memory: 512Mi
+    image: quay.io/konflux-ci/oras:latest@sha256:e52de03c78ea65bf806cebee6892f054e2ae7b554d302e4a83ef28ec5010b2ee
+    name: push-model
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      if [ "${IMAGE_APPEND_PLATFORM}" == "true" ]; then
+        IMAGE="${IMAGE}-${PLATFORM//[^a-zA-Z0-9]/-}"
+        export IMAGE
+      fi
+
+      echo "Selecting auth for $IMAGE"
+      select-oci-auth "$IMAGE" >auth.json
+
+      REPO="${IMAGE%:*}"
+      echo "Found that ${REPO} is the repository for ${IMAGE}"
+
+      cat >artifact-manifest.json <<EOL
+      {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "artifactType": "application/vnd.ai.model.llm.compressed",
+        "config": {
+          "mediaType": "application/vnd.oci.empty.v1+json",
+          "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "size": 2,
+          "data": "e30="
+        },
+        "layers": [],
+        "annotations": {
+          "org.opencontainers.image.created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        }
+      }
+      EOL
+
+      echo "Ensuring that the empty blob exists, for the image manifest config."
+      if ! echo -n "{}" | oras blob push \
+        --registry-config auth.json \
+        "${REPO}@sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a" \
+        --media-type application/vnd.oci.empty.v1+json --size 2 -; then
+        echo "Failed to push empty blob to registry"
+        exit 1
+      fi
+
+      # Push each file from the output directory
+      cd "${OUTPUT_DIR}"
+      for filepath in *; do
+        if [ ! -f "$filepath" ]; then
+          continue
+        fi
+
+        relative_path="$filepath"
+        echo "Processing file: $relative_path"
+
+        # Determine media type based on file extension
+        case "$filepath" in
+          *.safetensors)
+            MEDIA_TYPE="application/vnd.ai.model.safetensors"
+            ;;
+          *.json)
+            MEDIA_TYPE="application/vnd.ai.model.config+json"
+            ;;
+          *.bin)
+            MEDIA_TYPE="application/vnd.ai.model.weights"
+            ;;
+          *)
+            MEDIA_TYPE="application/octet-stream"
+            ;;
+        esac
+
+        echo "Pushing blob for ${relative_path} with media type ${MEDIA_TYPE}"
+        if ! oras blob push --registry-config /var/workdir/auth.json "${REPO}" --media-type "${MEDIA_TYPE}" "${filepath}"; then
+          echo "Failed to push blob for ${relative_path} to registry"
+          exit 1
+        fi
+
+        # Get the digest of the file we just pushed
+        DIGEST=$(sha256sum "$filepath" | awk '{print $1}')
+
+        echo "Fetching descriptor for blob sha256:${DIGEST}"
+        if ! oras blob fetch --registry-config /var/workdir/auth.json --descriptor "${REPO}@sha256:${DIGEST}" >/var/workdir/descriptor.json; then
+          echo "Failed to fetch blob descriptor from registry"
+          exit 1
+        fi
+
+        echo "Setting mediaType to ${MEDIA_TYPE}"
+        yq -oj -i '.mediaType = "'${MEDIA_TYPE}'"' /var/workdir/descriptor.json
+
+        echo "Inserting org.opencontainers.image.title = ${relative_path} annotation"
+        yq -oj -i '.annotations."org.opencontainers.image.title" = "'${relative_path}'"' /var/workdir/descriptor.json
+
+        echo "Appending blob descriptor for ${relative_path} to the overall artifact manifest"
+        yq -oj -i ".layers += $(cat /var/workdir/descriptor.json)" /var/workdir/artifact-manifest.json
+
+        echo "Done with ${relative_path}"
+      done
+
+      cd /var/workdir
+
+      echo "Pushing complete artifact manifest to ${IMAGE}"
+      if ! oras manifest push --registry-config auth.json "${IMAGE}" artifact-manifest.json; then
+        echo "Failed to push complete artifact manifest to ${IMAGE}"
+        exit 1
+      fi
+
+      if ! RESULTING_DIGEST=$(oras resolve --registry-config auth.json "${IMAGE}"); then
+        echo "Failed to get digest for ${IMAGE} from registry"
+        exit 1
+      fi
+      echo -n "$RESULTING_DIGEST" | tee "$(results.IMAGE_DIGEST.path)"
+      echo -n "$IMAGE" | tee "$(results.IMAGE_URL.path)"
+      echo -n "${IMAGE}@${RESULTING_DIGEST}" >"$(results.IMAGE_REF.path)"
+    securityContext:
+      capabilities:
+        add:
+        - SETFCAP
+    volumeMounts:
+    - mountPath: /var/lib/containers
+      name: varlibcontainers
+    - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+      name: trusted-ca
+      readOnly: true
+      subPath: ca-bundle.crt
+    workingDir: /var/workdir
+  - computeResources: {}
+    image: registry.access.redhat.com/rh-syft-tech-preview/syft-rhel9:1.29.0@sha256:dc0da6b4448428e625271b542cc029ab03de92f75ea50d6d63b1d088d20bbd28
+    name: sbom-generate
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      if [ "${IMAGE_APPEND_PLATFORM}" == "true" ]; then
+        IMAGE="${IMAGE}-${PLATFORM//[^a-zA-Z0-9]/-}"
+        export IMAGE
+      fi
+
+      echo "Generating SBOM for compressed model artifact"
+
+      case $SBOM_TYPE in
+        cyclonedx)
+          syft_sbom_type=cyclonedx-json@1.5 ;;
+        spdx)
+          syft_sbom_type=spdx-json@2.3 ;;
+        *)
+          echo "Invalid SBOM type: $SBOM_TYPE. Valid: cyclonedx, spdx" >&2
+          exit 1
+          ;;
+      esac
+
+      echo "Running syft on the output directory"
+      syft dir:"${OUTPUT_DIR}" --output "$syft_sbom_type"="$(pwd)/sbom.json"
+
+      echo "SBOM generation complete"
+    volumeMounts:
+    - mountPath: /etc/pki/tls/certs/ca-bundle.crt
+      name: trusted-ca
+      readOnly: true
+      subPath: ca-bundle.crt
+    workingDir: /var/workdir
+  - computeResources:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+    name: upload-sbom
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      if [ "${IMAGE_APPEND_PLATFORM}" == "true" ]; then
+        IMAGE="${IMAGE}-${PLATFORM//[^a-zA-Z0-9]/-}"
+        export IMAGE
+      fi
+
+      echo "Uploading SBOM to registry"
+
+      ca_bundle=/mnt/trusted-ca/ca-bundle.crt
+      if [ -f "$ca_bundle" ]; then
+        echo "INFO: Using mounted CA bundle: $ca_bundle"
+        cp -vf $ca_bundle /etc/pki/ca-trust/source/anchors
+        update-ca-trust
+      fi
+
+      # Pre-select the correct credentials to work around cosign not supporting the containers-auth.json spec
+      mkdir -p /tmp/auth && select-oci-auth "$(cat "$(results.IMAGE_REF.path)")" > /tmp/auth/config.json
+      export DOCKER_CONFIG=/tmp/auth
+      echo "Attaching SBOM to artifact"
+      if ! cosign attach sbom --sbom sbom.json --type "$SBOM_TYPE" "$(cat "$(results.IMAGE_REF.path)")"
+      then
+          echo "Failed to attach SBOM to registry"
+          exit 1
+      fi
+
+      # Remove tag from IMAGE while allowing registry to contain a port number.
+      sbom_repo="${IMAGE%:*}"
+      sbom_digest="$(sha256sum sbom.json | cut -d' ' -f1)"
+      # The SBOM_BLOB_URL is created by `cosign attach sbom`.
+      echo -n "${sbom_repo}@sha256:${sbom_digest}" | tee "$(results.SBOM_BLOB_URL.path)"
+
+      echo "SBOM upload complete"
+    volumeMounts:
+    - mountPath: /mnt/trusted-ca
+      name: trusted-ca
+      readOnly: true
+    workingDir: /var/workdir
+  volumes:
+  - configMap:
+      items:
+      - key: $(params.caTrustConfigMapKey)
+        path: ca-bundle.crt
+      name: $(params.caTrustConfigMapName)
+      optional: true
+    name: trusted-ca
+  - emptyDir: {}
+    name: workdir
+  - emptyDir: {}
+    name: varlibcontainers
+  - name: ssh
+    secret:
+      optional: false
+      secretName: multi-platform-ssh-$(context.taskRun.name)

@@ -10,12 +10,13 @@ yq --version | grep -q mikefarah/yq || {
   exit 1
 }
 
-# These 3 need to run in this order. Not for any logical reasons, but simply
+# These need to run in this order. Not for any logical reasons, but simply
 # because of the current state of dependence between the generated tasks
 # and the sources they are generated from.
 hack/build-manifests.sh
 hack/generate-ta-tasks.sh
 hack/generate-buildah-remote.sh
+hack/generate-llm-compressor-remote.sh
 
 hack/generate-pipelines-readme.py
 
