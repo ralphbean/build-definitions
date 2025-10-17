@@ -255,11 +255,6 @@ spec:
         DEVICE_FLAGS+=(--device "$device")
       done
 
-      # Add security-opt when devices are present (GPUs typically need this)
-      if [ ${#DEVICE_FLAGS[@]} -gt 0 ]; then
-        DEVICE_FLAGS+=(--security-opt=label=disable)
-      fi
-
       # Copy the compression script from source
       if [ ! -f "/var/workdir/source/${SCRIPT}" ]; then
         echo "ERROR: Script not found: /var/workdir/source/${SCRIPT}"

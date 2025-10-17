@@ -215,7 +215,14 @@ if ! [[ $IS_LOCALHOST ]]; then
 		if step.WorkingDir != "" {
 			ret += "cd " + step.WorkingDir + "\n"
 		}
-		ret += step.Script
+
+		// Remove the section that adds --security-opt to DEVICE_FLAGS
+		// This is handled by the outer podman run command via PODMAN_NVIDIA_ARGS
+		// buildah run doesn't support --security-opt flag
+		reSecurityOpt := regexp.MustCompile(`(?m)^\s*# Add security-opt when devices are present.*\n\s*if \[ \$\{#DEVICE_FLAGS\[@\]\} -gt 0 \]; then\n\s*DEVICE_FLAGS\+=\(--security-opt=label=disable\)\n\s*fi\n`)
+		scriptWithoutSecurityOpt := reSecurityOpt.ReplaceAllString(step.Script, "")
+
+		ret += scriptWithoutSecurityOpt
 		ret += "\nREMOTESSHEOF"
 		ret += "\nchmod +x " + script + "\n"
 		ret += "\necho \"[$(date --utc -Ins)] Platform: $PLATFORM\""
