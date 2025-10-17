@@ -152,6 +152,26 @@ spec:
           UNSHARE_ARGS+=("--net")
         fi
 
+        # Validate OUTPUT_DIR doesn't contain shell metacharacters
+        if [[ "$OUTPUT_DIR" =~ [';|&$`<>'] ]]; then
+          echo "ERROR: OUTPUT_DIR contains invalid characters: $OUTPUT_DIR"
+          exit 1
+        fi
+
+        # Validate OUTPUT_DIR is within /var/workdir
+        REAL_OUTPUT_DIR="$(realpath -m "$OUTPUT_DIR")"
+        if [[ "${REAL_OUTPUT_DIR}" != /var/workdir/* ]]; then
+          echo "ERROR: OUTPUT_DIR must be within /var/workdir: ${REAL_OUTPUT_DIR}"
+          exit 1
+        fi
+
+        # Validate SCRIPT path doesn't escape source directory
+        REAL_SCRIPT_PATH="$(realpath -m "/var/workdir/source/${SCRIPT}")"
+        if [[ "${REAL_SCRIPT_PATH}" != /var/workdir/source/* ]]; then
+          echo "ERROR: SCRIPT path escapes source directory: ${REAL_SCRIPT_PATH}"
+          exit 1
+        fi
+
         PREFETCH_MOUNT=""
         PREFETCH_SOURCE=""
         if [ -d "/var/workdir/cachi2" ]; then
@@ -177,8 +197,38 @@ spec:
         buildah from --name compress-container --security-opt=unmask=/proc/interrupts "$COMPRESSOR_IMAGE"
 
         # Execute the script using its shebang (supports both .py and .sh scripts)
-        BUILDAH_CMD="buildah run ${PREFETCH_MOUNT} --volume /tmp/${SCRIPT_BASENAME}:/tmp/${SCRIPT_BASENAME} --volume /var/workdir/source:/var/workdir/source --volume ${OUTPUT_DIR}:${OUTPUT_DIR} --workingdir /var/workdir/source --user root:root -- compress-container /bin/sh -c '${PREFETCH_SOURCE} /tmp/${SCRIPT_BASENAME}'"
-        unshare -Uf "${UNSHARE_ARGS[@]}" --keep-caps -r --map-users 1,1,65536 --map-groups 1,1,65536 -w /var/workdir sh -c "${BUILDAH_CMD}"
+        # Build command safely using array to avoid shell injection
+        BUILDAH_ARGS=(
+          "buildah" "run"
+        )
+
+        # Add prefetch mount if available
+        if [ -n "$PREFETCH_MOUNT" ]; then
+          BUILDAH_ARGS+=("--volume" "/var/workdir/cachi2:/cachi2")
+        fi
+
+        # Add remaining volume mounts with proper quoting
+        BUILDAH_ARGS+=(
+          "--volume" "/tmp/${SCRIPT_BASENAME}:/tmp/${SCRIPT_BASENAME}"
+          "--volume" "/var/workdir/source:/var/workdir/source"
+          "--volume" "${OUTPUT_DIR}:${OUTPUT_DIR}"
+          "--workingdir" "/var/workdir/source"
+          "--user" "root:root"
+          "--" "compress-container"
+          "/bin/sh" "-c"
+        )
+
+        # Build inner command safely
+        if [ -n "$PREFETCH_SOURCE" ]; then
+          INNER_CMD=". /cachi2/cachi2.env && /tmp/${SCRIPT_BASENAME}"
+        else
+          INNER_CMD="/tmp/${SCRIPT_BASENAME}"
+        fi
+
+        BUILDAH_ARGS+=("$INNER_CMD")
+
+        # Execute without outer sh -c wrapper to prevent injection
+        unshare -Uf "${UNSHARE_ARGS[@]}" --keep-caps -r --map-users 1,1,65536 --map-groups 1,1,65536 -w /var/workdir "${BUILDAH_ARGS[@]}"
 
         IMAGE_REFERENCE=$(buildah inspect compress-container | jq -r '.FromImage')
         # FromImage might contain the digest or not. Append the digest if it does not.
@@ -217,9 +267,9 @@ spec:
         set -euo pipefail
 
         echo "Selecting auth for $IMAGE"
-        select-oci-auth $IMAGE >auth.json
+        select-oci-auth "$IMAGE" >auth.json
 
-        REPO=${IMAGE%:*}
+        REPO="${IMAGE%:*}"
         echo "Found that ${REPO} is the repository for ${IMAGE}"
 
         cat >artifact-manifest.json <<EOL
@@ -243,7 +293,7 @@ spec:
         echo "Ensuring that the empty blob exists, for the image manifest config."
         if ! echo -n "{}" | oras blob push \
           --registry-config auth.json \
-          ${REPO}@sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a \
+          "${REPO}@sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a" \
           --media-type application/vnd.oci.empty.v1+json --size 2 -; then
           echo "Failed to push empty blob to registry"
           exit 1
