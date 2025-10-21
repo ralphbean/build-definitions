@@ -174,6 +174,10 @@ spec:
           value: "/var/workdir/compressed-output"
         - name: SBOM_TYPE
           value: "cyclonedx"
+        - name: GIT_URL
+          value: "https://github.com/example/test-llm-repo.git"
+        - name: GIT_COMMIT
+          value: "abc123def456789012345678901234567890abcd"
         - name: caTrustConfigMapName
           value: trusted-ca
         - name: caTrustConfigMapKey
@@ -210,6 +214,63 @@ spec:
               subPath: ca-bundle.crt
               readOnly: true
         steps:
+          - name: check-annotations
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            env:
+              - name: IMAGE_REF
+                value: $(params.IMAGE_REF)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "Verifying OCI artifact annotations..."
+
+              # Remove tag from IMAGE_REF
+              IMAGE_REF_NO_TAG="${IMAGE_REF%%:*}@${IMAGE_REF##*@}"
+
+              # Get the manifest
+              if ! MANIFEST=$(skopeo inspect --raw "docker://${IMAGE_REF_NO_TAG}"); then
+                echo "ERROR: Cannot inspect manifest at ${IMAGE_REF_NO_TAG}"
+                exit 1
+              fi
+
+              echo "Manifest retrieved successfully"
+
+              # Check for org.opencontainers.image.created
+              if ! echo "$MANIFEST" | jq -e '.annotations."org.opencontainers.image.created"' > /dev/null; then
+                echo "ERROR: Missing org.opencontainers.image.created annotation"
+                exit 1
+              fi
+              CREATED=$(echo "$MANIFEST" | jq -r '.annotations."org.opencontainers.image.created"')
+              echo "✓ Found org.opencontainers.image.created: $CREATED"
+
+              # Check for org.opencontainers.image.revision
+              if ! echo "$MANIFEST" | jq -e '.annotations."org.opencontainers.image.revision"' > /dev/null; then
+                echo "ERROR: Missing org.opencontainers.image.revision annotation"
+                exit 1
+              fi
+              REVISION=$(echo "$MANIFEST" | jq -r '.annotations."org.opencontainers.image.revision"')
+              echo "✓ Found org.opencontainers.image.revision: $REVISION"
+
+              if [ "$REVISION" != "abc123def456789012345678901234567890abcd" ]; then
+                echo "ERROR: Expected revision 'abc123def456789012345678901234567890abcd', got '$REVISION'"
+                exit 1
+              fi
+
+              # Check for org.opencontainers.image.source
+              if ! echo "$MANIFEST" | jq -e '.annotations."org.opencontainers.image.source"' > /dev/null; then
+                echo "ERROR: Missing org.opencontainers.image.source annotation"
+                exit 1
+              fi
+              SOURCE=$(echo "$MANIFEST" | jq -r '.annotations."org.opencontainers.image.source"')
+              echo "✓ Found org.opencontainers.image.source: $SOURCE"
+
+              if [ "$SOURCE" != "https://github.com/example/test-llm-repo.git" ]; then
+                echo "ERROR: Expected source 'https://github.com/example/test-llm-repo.git', got '$SOURCE'"
+                exit 1
+              fi
+
+              echo "All annotations verified successfully!"
           - name: check-sbom-contains-hermeto-components
             image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
             env:

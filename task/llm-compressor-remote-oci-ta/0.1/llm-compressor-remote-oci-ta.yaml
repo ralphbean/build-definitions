@@ -70,6 +70,12 @@ spec:
     description: Array of command line arguments to pass to the compression script
     name: SCRIPT_ARGS
     type: array
+  - description: Source repository URL for OCI artifact annotations
+    name: GIT_URL
+    type: string
+  - description: Source repository commit SHA for OCI artifact annotations
+    name: GIT_COMMIT
+    type: string
   - description: The platform to build on
     name: PLATFORM
     type: string
@@ -437,6 +443,11 @@ spec:
       requests:
         cpu: 250m
         memory: 512Mi
+    env:
+    - name: GIT_URL
+      value: $(params.GIT_URL)
+    - name: GIT_COMMIT
+      value: $(params.GIT_COMMIT)
     image: quay.io/konflux-ci/oras:latest@sha256:e52de03c78ea65bf806cebee6892f054e2ae7b554d302e4a83ef28ec5010b2ee
     name: push-model
     script: |
@@ -453,6 +464,9 @@ spec:
       REPO="${IMAGE%:*}"
       echo "Found that ${REPO} is the repository for ${IMAGE}"
 
+      # Build annotations JSON
+      CREATED_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
       cat >artifact-manifest.json <<EOL
       {
         "schemaVersion": 2,
@@ -466,10 +480,21 @@ spec:
         },
         "layers": [],
         "annotations": {
-          "org.opencontainers.image.created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          "org.opencontainers.image.created": "${CREATED_TIMESTAMP}"
         }
       }
       EOL
+
+      # Add git annotations if provided
+      if [ -n "${GIT_COMMIT}" ]; then
+        echo "Adding org.opencontainers.image.revision annotation: ${GIT_COMMIT}"
+        yq -oj -i '.annotations."org.opencontainers.image.revision" = "'${GIT_COMMIT}'"' artifact-manifest.json
+      fi
+
+      if [ -n "${GIT_URL}" ]; then
+        echo "Adding org.opencontainers.image.source annotation: ${GIT_URL}"
+        yq -oj -i '.annotations."org.opencontainers.image.source" = "'${GIT_URL}'"' artifact-manifest.json
+      fi
 
       echo "Ensuring that the empty blob exists, for the image manifest config."
       if ! echo -n "{}" | oras blob push \
@@ -560,40 +585,6 @@ spec:
       readOnly: true
       subPath: ca-bundle.crt
     workingDir: /var/workdir
-  - computeResources: {}
-    image: registry.access.redhat.com/rh-syft-tech-preview/syft-rhel9:1.29.0@sha256:dc0da6b4448428e625271b542cc029ab03de92f75ea50d6d63b1d088d20bbd28
-    name: sbom-syft-generate
-    script: |
-      #!/bin/bash
-      set -euo pipefail
-      if [ "${IMAGE_APPEND_PLATFORM}" == "true" ]; then
-        IMAGE="${IMAGE}-${PLATFORM//[^a-zA-Z0-9]/-}"
-        export IMAGE
-      fi
-
-      echo "Generating SBOM components from output directory using syft"
-
-      case $SBOM_TYPE in
-        cyclonedx)
-          syft_sbom_type=cyclonedx-json@1.5 ;;
-        spdx)
-          syft_sbom_type=spdx-json@2.3 ;;
-        *)
-          echo "Invalid SBOM type: $SBOM_TYPE. Valid: cyclonedx, spdx" >&2
-          exit 1
-          ;;
-      esac
-
-      echo "Running syft on the output directory"
-      syft dir:"${OUTPUT_DIR}" --output "$syft_sbom_type"="/var/workdir/sbom-output.json"
-
-      echo "Syft SBOM generation complete"
-    volumeMounts:
-    - mountPath: /etc/pki/tls/certs/ca-bundle.crt
-      name: trusted-ca
-      readOnly: true
-      subPath: ca-bundle.crt
-    workingDir: /var/workdir
   - computeResources:
       limits:
         memory: 512Mi
@@ -601,7 +592,7 @@ spec:
         cpu: 100m
         memory: 256Mi
     image: quay.io/konflux-ci/mobster:1.0.0-1760010717@sha256:213269cdde962187fef52532c5794589a9bd309962333d150e46b5dfe8e50461
-    name: sbom-merge
+    name: sbom-generate
     script: |
       #!/bin/bash
       set -euo pipefail
@@ -610,30 +601,26 @@ spec:
         export IMAGE
       fi
 
-      echo "Merging SBOM components using mobster"
+      echo "Generating SBOM using mobster with hermeto dependencies"
 
       IMAGE_URL="$(cat "$(results.IMAGE_URL.path)")"
       IMAGE_DIGEST="$(cat "$(results.IMAGE_DIGEST.path)")"
 
-      mobster_args=(
-        generate
-        --output sbom.json
-        oci-image
-        --from-syft "/var/workdir/sbom-output.json"
-        --image-pullspec "$IMAGE_URL"
-        --image-digest "$IMAGE_DIGEST"
-      )
-
       if [ -f "/var/workdir/cachi2/output/bom.json" ]; then
-        echo "Found hermeto-provided bom.json from cachi2, adding it to SBOM"
-        mobster_args+=(--from-hermeto "/var/workdir/cachi2/output/bom.json")
+        echo "Found hermeto-provided bom.json from cachi2"
+        mobster generate \
+          --output sbom.json \
+          oci-image \
+          --from-hermeto "/var/workdir/cachi2/output/bom.json" \
+          --image-pullspec "$IMAGE_URL" \
+          --image-digest "$IMAGE_DIGEST"
       else
-        echo "No hermeto bom.json found, using only syft output"
+        echo "ERROR: No hermeto bom.json found. CACHI2_ARTIFACT is required for SBOM generation."
+        echo "Please provide a CACHI2_ARTIFACT containing dependency information."
+        exit 1
       fi
 
-      mobster "${mobster_args[@]}"
-
-      echo "SBOM merge complete"
+      echo "SBOM generation complete"
     volumeMounts:
     - mountPath: /etc/pki/tls/certs/ca-bundle.crt
       name: trusted-ca
