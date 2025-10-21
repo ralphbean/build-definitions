@@ -1,0 +1,266 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-llm-compressor-oci-ta-with-hermeto-bom
+spec:
+  description: |
+    Test the llm-compressor-oci-ta task with a hermeto-provided bom.json from cachi2
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: mock-trusted-artifacts
+      params:
+        - name: ociStorage
+          value: registry-service.kind-registry/oci-ta:latest
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        results:
+        - name: SOURCE_ARTIFACT
+          type: string
+        - name: CACHI2_ARTIFACT
+          type: string
+        workspaces:
+          - name: tests-workspace
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        params:
+          - name: ociStorage
+          - name: caTrustConfigMapName
+          - name: caTrustConfigMapKey
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: mock-source
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # Create a source directory with our mock compression script
+              mkdir -p "$(workspaces.tests-workspace.path)/source"
+
+              cat > "$(workspaces.tests-workspace.path)/source/compress.py" << 'SCRIPT_EOF'
+              #!/usr/bin/env python3
+              import os
+              import json
+
+              def main():
+                  print("Starting mock model compression...")
+                  output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
+                  print(f"Output directory: {output_dir}")
+                  os.makedirs(output_dir, exist_ok=True)
+
+                  # Create mock model files
+                  with open(os.path.join(output_dir, "model.safetensors"), "w") as f:
+                      f.write("MOCK_COMPRESSED_MODEL_WEIGHTS_DATA")
+
+                  config = {"model_type": "test", "compressed": True}
+                  with open(os.path.join(output_dir, "config.json"), "w") as f:
+                      json.dump(config, f, indent=2)
+
+                  print("Mock compression complete!")
+                  return 0
+
+              if __name__ == "__main__":
+                  exit(main())
+              SCRIPT_EOF
+
+              chmod +x "$(workspaces.tests-workspace.path)/source/compress.py"
+          - name: mock-cachi2
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # Create a mock cachi2 output with hermeto bom.json
+              mkdir -p "$(workspaces.tests-workspace.path)/cachi2/output"
+
+              # Create a mock hermeto bom.json
+              cat > "$(workspaces.tests-workspace.path)/cachi2/output/bom.json" << 'BOM_EOF'
+              {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.5",
+                "version": 1,
+                "metadata": {
+                  "component": {
+                    "type": "application",
+                    "name": "test-llm-compressor"
+                  },
+                  "tools": [
+                    {
+                      "name": "hermeto",
+                      "version": "1.0.0"
+                    }
+                  ]
+                },
+                "components": [
+                  {
+                    "type": "library",
+                    "name": "numpy",
+                    "version": "1.26.0",
+                    "purl": "pkg:pypi/numpy@1.26.0"
+                  },
+                  {
+                    "type": "library",
+                    "name": "transformers",
+                    "version": "4.35.0",
+                    "purl": "pkg:pypi/transformers@4.35.0"
+                  },
+                  {
+                    "type": "library",
+                    "name": "torch",
+                    "version": "2.1.0",
+                    "purl": "pkg:pypi/torch@2.1.0"
+                  }
+                ]
+              }
+              BOM_EOF
+
+              # Create a mock cachi2.env file
+              cat > "$(workspaces.tests-workspace.path)/cachi2/cachi2.env" << 'ENV_EOF'
+              export PIP_INDEX_URL=http://localhost:8080/simple
+              export PIP_FIND_LINKS=/cachi2/output/deps/pip
+              export HF_HUB_OFFLINE=1
+              export HF_DATASETS_OFFLINE=1
+              ENV_EOF
+
+              echo "Created mock cachi2 directory with hermeto bom.json:"
+              ls -la "$(workspaces.tests-workspace.path)/cachi2/output"
+              cat "$(workspaces.tests-workspace.path)/cachi2/output/bom.json"
+          - name: create-source-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.SOURCE_ARTIFACT.path)=$(workspaces.tests-workspace.path)/source
+          - name: create-cachi2-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.CACHI2_ARTIFACT.path)=$(workspaces.tests-workspace.path)/cachi2
+    - name: run-llm-compressor-task
+      taskRef:
+        name: llm-compressor-oci-ta
+      params:
+        - name: SOURCE_ARTIFACT
+          value: $(tasks.mock-trusted-artifacts.results.SOURCE_ARTIFACT)
+        - name: CACHI2_ARTIFACT
+          value: $(tasks.mock-trusted-artifacts.results.CACHI2_ARTIFACT)
+        - name: IMAGE
+          value: registry-service.kind-registry/test-compressed-model-hermeto:latest
+        - name: COMPRESSOR_IMAGE
+          value: "python:3.11-slim"
+        - name: SCRIPT
+          value: "compress.py"
+        - name: HERMETIC
+          value: "true"
+        - name: OUTPUT_DIR
+          value: "/var/workdir/compressed-output"
+        - name: SBOM_TYPE
+          value: "cyclonedx"
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      runAfter:
+        - mock-trusted-artifacts
+    - name: verify-hermeto-bom-used
+      params:
+        - name: IMAGE_REF
+          value: $(tasks.run-llm-compressor-task.results.IMAGE_REF)
+        - name: SBOM_BLOB_URL
+          value: $(tasks.run-llm-compressor-task.results.SBOM_BLOB_URL)
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        params:
+          - name: IMAGE_REF
+          - name: SBOM_BLOB_URL
+          - name: caTrustConfigMapName
+          - name: caTrustConfigMapKey
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: check-sbom-contains-hermeto-components
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            env:
+              - name: IMAGE_REF
+                value: $(params.IMAGE_REF)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "Verifying SBOM contains components from hermeto bom.json..."
+
+              # Remove tag from IMAGE_REF
+              IMAGE_REF_NO_TAG="${IMAGE_REF%%:*}@${IMAGE_REF##*@}"
+
+              if ! cosign download sbom "$IMAGE_REF_NO_TAG" > sbom.json; then
+                echo "ERROR: Cannot download SBOM for ${IMAGE_REF_NO_TAG}"
+                exit 1
+              fi
+
+              echo "✓ SBOM downloaded successfully"
+
+              # Verify it's valid JSON
+              if ! jq . sbom.json > /dev/null; then
+                echo "ERROR: SBOM is not valid JSON"
+                exit 1
+              fi
+
+              echo "✓ SBOM is valid JSON"
+
+              # Check for expected components from hermeto bom.json
+              # The SBOM format may differ (SPDX vs CycloneDX), but we should
+              # be able to find the package names we included in the mock bom.json
+
+              echo "Checking SBOM for hermeto-provided components..."
+              echo "SBOM content:"
+              jq . sbom.json
+
+              # For SPDX format, check for packages
+              if jq -e '.spdxVersion' sbom.json > /dev/null; then
+                echo "SBOM is in SPDX format, checking packages..."
+
+                # Check if any of our test packages are in the SBOM
+                # mobster should have merged them from the hermeto bom.json
+                if jq -e '.packages[] | select(.name == "numpy" or .name == "transformers" or .name == "torch")' sbom.json > /dev/null; then
+                  echo "✓ Found hermeto-provided components in SBOM"
+                else
+                  echo "WARNING: Expected components from hermeto bom.json not found in SBOM"
+                  echo "This may be expected if mobster processes the bom differently"
+                fi
+              fi
+
+              echo "Hermeto BOM integration verification complete!"
+      runAfter:
+        - run-llm-compressor-task

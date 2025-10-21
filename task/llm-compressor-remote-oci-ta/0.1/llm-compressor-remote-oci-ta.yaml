@@ -562,7 +562,7 @@ spec:
     workingDir: /var/workdir
   - computeResources: {}
     image: registry.access.redhat.com/rh-syft-tech-preview/syft-rhel9:1.29.0@sha256:dc0da6b4448428e625271b542cc029ab03de92f75ea50d6d63b1d088d20bbd28
-    name: sbom-generate
+    name: sbom-syft-generate
     script: |
       #!/bin/bash
       set -euo pipefail
@@ -571,7 +571,7 @@ spec:
         export IMAGE
       fi
 
-      echo "Generating SBOM for compressed model artifact"
+      echo "Generating SBOM components from output directory using syft"
 
       case $SBOM_TYPE in
         cyclonedx)
@@ -585,9 +585,55 @@ spec:
       esac
 
       echo "Running syft on the output directory"
-      syft dir:"${OUTPUT_DIR}" --output "$syft_sbom_type"="$(pwd)/sbom.json"
+      syft dir:"${OUTPUT_DIR}" --output "$syft_sbom_type"="/var/workdir/sbom-output.json"
 
-      echo "SBOM generation complete"
+      echo "Syft SBOM generation complete"
+    volumeMounts:
+    - mountPath: /etc/pki/tls/certs/ca-bundle.crt
+      name: trusted-ca
+      readOnly: true
+      subPath: ca-bundle.crt
+    workingDir: /var/workdir
+  - computeResources:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    image: quay.io/konflux-ci/mobster:1.0.0-1760010717@sha256:213269cdde962187fef52532c5794589a9bd309962333d150e46b5dfe8e50461
+    name: sbom-merge
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      if [ "${IMAGE_APPEND_PLATFORM}" == "true" ]; then
+        IMAGE="${IMAGE}-${PLATFORM//[^a-zA-Z0-9]/-}"
+        export IMAGE
+      fi
+
+      echo "Merging SBOM components using mobster"
+
+      IMAGE_URL="$(cat "$(results.IMAGE_URL.path)")"
+      IMAGE_DIGEST="$(cat "$(results.IMAGE_DIGEST.path)")"
+
+      mobster_args=(
+        generate
+        --output sbom.json
+        oci-image
+        --from-syft "/var/workdir/sbom-output.json"
+        --image-pullspec "$IMAGE_URL"
+        --image-digest "$IMAGE_DIGEST"
+      )
+
+      if [ -f "/var/workdir/cachi2/output/bom.json" ]; then
+        echo "Found hermeto-provided bom.json from cachi2, adding it to SBOM"
+        mobster_args+=(--from-hermeto "/var/workdir/cachi2/output/bom.json")
+      else
+        echo "No hermeto bom.json found, using only syft output"
+      fi
+
+      mobster "${mobster_args[@]}"
+
+      echo "SBOM merge complete"
     volumeMounts:
     - mountPath: /etc/pki/tls/certs/ca-bundle.crt
       name: trusted-ca
