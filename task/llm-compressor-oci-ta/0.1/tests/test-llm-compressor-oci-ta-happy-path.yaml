@@ -61,6 +61,7 @@ spec:
 
               def main():
                   print("Starting mock model compression...")
+                  print(f"Command line arguments: {sys.argv[1:]}")
                   time.sleep(2)
 
                   output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
@@ -164,6 +165,14 @@ spec:
           value: "compress.py"
         - name: HERMETIC
           value: "true"
+        - name: OUTPUT_DIR
+          value: "/var/workdir/compressed-output"
+        - name: SCRIPT_ARGS
+          value:
+            - "--test-arg1"
+            - "value1"
+            - "--test-arg2"
+            - "value with spaces"
         - name: SBOM_TYPE
           value: "spdx"
         - name: caTrustConfigMapName

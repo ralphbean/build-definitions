@@ -59,6 +59,10 @@ spec:
       description: Array of device specifications to pass to buildah run (e.g., "nvidia.com/gpu=all" for NVIDIA GPUs, "/dev/dri" for AMD/Intel GPUs). Only alphanumeric, slash, dot, equals, colon, and dash characters allowed.
       type: array
       default: []
+    - name: SCRIPT_ARGS
+      description: Array of command line arguments to pass to the compression script
+      type: array
+      default: []
   results:
     - name: IMAGE_DIGEST
       description: Digest of the compressed model artifact just pushed
@@ -133,6 +137,8 @@ spec:
           value: $(params.STORAGE_DRIVER)
       args:
         - $(params.BUILDAH_DEVICES[*])
+        - --
+        - $(params.SCRIPT_ARGS[*])
       script: |
         #!/bin/bash
         set -euo pipefail
@@ -185,16 +191,29 @@ spec:
           PREFETCH_SOURCE=". /cachi2/cachi2.env &&"
         fi
 
-        # Parse and validate BUILDAH_DEVICES array
+        # Parse and validate BUILDAH_DEVICES and SCRIPT_ARGS arrays
+        # Args are passed as: BUILDAH_DEVICES... -- SCRIPT_ARGS...
         DEVICE_FLAGS=()
-        for device in "$@"; do
-          # Validate device spec format (only allow safe characters)
-          if [[ ! "$device" =~ ^[a-zA-Z0-9/._=:-]+$ ]]; then
-            echo "ERROR: Invalid device spec: $device"
-            echo "Device specs must contain only alphanumeric, /, ., =, :, - characters"
-            exit 1
+        SCRIPT_ARGS=()
+        PARSING_DEVICES=true
+
+        for arg in "$@"; do
+          if [ "$arg" == "--" ]; then
+            PARSING_DEVICES=false
+            continue
           fi
-          DEVICE_FLAGS+=(--device "$device")
+
+          if [ "$PARSING_DEVICES" == "true" ]; then
+            # Validate device spec format (only allow safe characters)
+            if [[ ! "$arg" =~ ^[a-zA-Z0-9/._=:-]+$ ]]; then
+              echo "ERROR: Invalid device spec: $arg"
+              echo "Device specs must contain only alphanumeric, /, ., =, :, - characters"
+              exit 1
+            fi
+            DEVICE_FLAGS+=(--device "$arg")
+          else
+            SCRIPT_ARGS+=("$arg")
+          fi
         done
 
         # Add security-opt when devices are present (GPUs typically need this)
@@ -240,17 +259,28 @@ spec:
           "--volume" "/tmp/${SCRIPT_BASENAME}:/tmp/${SCRIPT_BASENAME}"
           "--volume" "/var/workdir/source:/var/workdir/source"
           "--volume" "${OUTPUT_DIR}:${OUTPUT_DIR}"
+          "--env" "OUTPUT_DIR=${OUTPUT_DIR}"
           "--workingdir" "/var/workdir/source"
           "--user" "root:root"
           "--" "compress-container"
           "/bin/sh" "-c"
         )
 
-        # Build inner command safely
+        # Build inner command safely with script arguments
+        SCRIPT_CMD="/tmp/${SCRIPT_BASENAME}"
+        if [ ${#SCRIPT_ARGS[@]} -gt 0 ]; then
+          # Properly quote each argument for the shell command
+          for arg in "${SCRIPT_ARGS[@]}"; do
+            # Escape single quotes in the argument
+            escaped_arg="${arg//\'/\'\\\'\'}"
+            SCRIPT_CMD="${SCRIPT_CMD} '${escaped_arg}'"
+          done
+        fi
+
         if [ -n "$PREFETCH_SOURCE" ]; then
-          INNER_CMD=". /cachi2/cachi2.env && /tmp/${SCRIPT_BASENAME}"
+          INNER_CMD=". /cachi2/cachi2.env && ${SCRIPT_CMD}"
         else
-          INNER_CMD="/tmp/${SCRIPT_BASENAME}"
+          INNER_CMD="${SCRIPT_CMD}"
         fi
 
         BUILDAH_ARGS+=("$INNER_CMD")
