@@ -21,6 +21,8 @@ spec:
         results:
         - name: SOURCE_ARTIFACT
           type: string
+        - name: CACHI2_ARTIFACT
+          type: string
         workspaces:
           - name: tests-workspace
         volumes:
@@ -142,13 +144,58 @@ spec:
 
               echo "Created source directory with test files:"
               ls -la "$(workspaces.tests-workspace.path)/source"
-          - name: create-trusted-artifact
+          - name: mock-cachi2
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # Create a mock cachi2 output with hermeto bom.json
+              mkdir -p "$(workspaces.tests-workspace.path)/cachi2/output"
+
+              # Create a mock hermeto bom.json
+              cat > "$(workspaces.tests-workspace.path)/cachi2/output/bom.json" << 'BOM_EOF'
+              {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.5",
+                "version": 1,
+                "metadata": {
+                  "component": {
+                    "type": "application",
+                    "name": "test-llm-compressor"
+                  }
+                },
+                "components": [
+                  {
+                    "type": "library",
+                    "name": "test-dependency",
+                    "version": "1.0.0",
+                    "purl": "pkg:pypi/test-dependency@1.0.0"
+                  }
+                ]
+              }
+              BOM_EOF
+
+              # Create a mock cachi2.env file
+              cat > "$(workspaces.tests-workspace.path)/cachi2/cachi2.env" << 'ENV_EOF'
+              export PIP_INDEX_URL=http://localhost:8080/simple
+              ENV_EOF
+
+              echo "Created mock cachi2 directory"
+          - name: create-source-artifact
             image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
             args:
               - create
               - --store
               - $(params.ociStorage)
               - $(results.SOURCE_ARTIFACT.path)=$(workspaces.tests-workspace.path)/source
+          - name: create-cachi2-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.CACHI2_ARTIFACT.path)=$(workspaces.tests-workspace.path)/cachi2
     - name: run-llm-compressor-task
       taskRef:
         name: llm-compressor-oci-ta
@@ -156,7 +203,7 @@ spec:
         - name: SOURCE_ARTIFACT
           value: $(tasks.mock-trusted-artifact.results.SOURCE_ARTIFACT)
         - name: CACHI2_ARTIFACT
-          value: ""
+          value: $(tasks.mock-trusted-artifact.results.CACHI2_ARTIFACT)
         - name: IMAGE
           value: registry-service.kind-registry/test-compressed-model:latest
         - name: COMPRESSOR_IMAGE
@@ -174,7 +221,11 @@ spec:
             - "--test-arg2"
             - "value with spaces"
         - name: SBOM_TYPE
-          value: "spdx"
+          value: "cyclonedx"
+        - name: GIT_URL
+          value: "https://github.com/example/test-repo.git"
+        - name: GIT_COMMIT
+          value: "1234567890abcdef1234567890abcdef12345678"
         - name: caTrustConfigMapName
           value: trusted-ca
         - name: caTrustConfigMapKey

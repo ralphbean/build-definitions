@@ -1,0 +1,218 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-llm-compressor-oci-ta-with-additional-annotations
+spec:
+  description: |
+    Test the llm-compressor-oci-ta task with ADDITIONAL_ANNOTATIONS parameter
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: mock-trusted-artifacts
+      params:
+        - name: ociStorage
+          value: registry-service.kind-registry/oci-ta:latest
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        results:
+        - name: SOURCE_ARTIFACT
+          type: string
+        - name: CACHI2_ARTIFACT
+          type: string
+        workspaces:
+          - name: tests-workspace
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        params:
+          - name: ociStorage
+          - name: caTrustConfigMapName
+          - name: caTrustConfigMapKey
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: mock-source
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              mkdir -p "$(workspaces.tests-workspace.path)/source"
+
+              cat > "$(workspaces.tests-workspace.path)/source/compress.py" << 'SCRIPT_EOF'
+              #!/usr/bin/env python3
+              import os
+              import json
+
+              output_dir = os.environ.get("OUTPUT_DIR", "/var/workdir/output")
+              os.makedirs(output_dir, exist_ok=True)
+
+              with open(os.path.join(output_dir, "model.safetensors"), "w") as f:
+                  f.write("MOCK_DATA")
+
+              config = {"model_type": "test"}
+              with open(os.path.join(output_dir, "config.json"), "w") as f:
+                  json.dump(config, f)
+              SCRIPT_EOF
+
+              chmod +x "$(workspaces.tests-workspace.path)/source/compress.py"
+          - name: mock-cachi2
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              mkdir -p "$(workspaces.tests-workspace.path)/cachi2/output"
+
+              cat > "$(workspaces.tests-workspace.path)/cachi2/output/bom.json" << 'BOM_EOF'
+              {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.5",
+                "version": 1,
+                "metadata": {"component": {"type": "application", "name": "test"}},
+                "components": []
+              }
+              BOM_EOF
+
+              cat > "$(workspaces.tests-workspace.path)/cachi2/cachi2.env" << 'ENV_EOF'
+              export PIP_INDEX_URL=http://localhost:8080/simple
+              ENV_EOF
+          - name: create-source-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.SOURCE_ARTIFACT.path)=$(workspaces.tests-workspace.path)/source
+          - name: create-cachi2-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.CACHI2_ARTIFACT.path)=$(workspaces.tests-workspace.path)/cachi2
+    - name: run-llm-compressor-task
+      taskRef:
+        name: llm-compressor-oci-ta
+      params:
+        - name: SOURCE_ARTIFACT
+          value: $(tasks.mock-trusted-artifacts.results.SOURCE_ARTIFACT)
+        - name: CACHI2_ARTIFACT
+          value: $(tasks.mock-trusted-artifacts.results.CACHI2_ARTIFACT)
+        - name: IMAGE
+          value: registry-service.kind-registry/test-annotations:latest
+        - name: COMPRESSOR_IMAGE
+          value: "python:3.11-slim"
+        - name: SCRIPT
+          value: "compress.py"
+        - name: HERMETIC
+          value: "true"
+        - name: OUTPUT_DIR
+          value: "/var/workdir/output"
+        - name: SBOM_TYPE
+          value: "cyclonedx"
+        - name: GIT_URL
+          value: "https://github.com/example/test-annotations-repo.git"
+        - name: GIT_COMMIT
+          value: "abc123def456789012345678901234567890abcd"
+        - name: ADDITIONAL_ANNOTATIONS
+          value:
+            - "custom-label=custom-value"
+            - "build-id=12345"
+            - "team=ml-team"
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      runAfter:
+        - mock-trusted-artifacts
+    - name: verify-annotations
+      params:
+        - name: IMAGE_REF
+          value: $(tasks.run-llm-compressor-task.results.IMAGE_REF)
+        - name: caTrustConfigMapName
+          value: trusted-ca
+        - name: caTrustConfigMapKey
+          value: ca-bundle.crt
+      taskSpec:
+        params:
+          - name: IMAGE_REF
+          - name: caTrustConfigMapName
+          - name: caTrustConfigMapKey
+        volumes:
+          - name: trusted-ca
+            configMap:
+              items:
+                - key: $(params.caTrustConfigMapKey)
+                  path: ca-bundle.crt
+              name: $(params.caTrustConfigMapName)
+        stepTemplate:
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+        steps:
+          - name: check-additional-annotations
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            env:
+              - name: IMAGE_REF
+                value: $(params.IMAGE_REF)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              echo "Verifying ADDITIONAL_ANNOTATIONS are applied..."
+
+              # Remove tag from IMAGE_REF
+              IMAGE_REF_NO_TAG="${IMAGE_REF%%:*}@${IMAGE_REF##*@}"
+
+              # Get the manifest
+              MANIFEST=$(skopeo inspect --raw "docker://${IMAGE_REF_NO_TAG}")
+
+              # Check custom-label
+              CUSTOM_LABEL=$(echo "$MANIFEST" | jq -r '.annotations."custom-label"')
+              if [ "$CUSTOM_LABEL" != "custom-value" ]; then
+                echo "ERROR: Expected custom-label='custom-value', got '$CUSTOM_LABEL'"
+                exit 1
+              fi
+              echo "✓ custom-label=custom-value"
+
+              # Check build-id
+              BUILD_ID=$(echo "$MANIFEST" | jq -r '.annotations."build-id"')
+              if [ "$BUILD_ID" != "12345" ]; then
+                echo "ERROR: Expected build-id='12345', got '$BUILD_ID'"
+                exit 1
+              fi
+              echo "✓ build-id=12345"
+
+              # Check team
+              TEAM=$(echo "$MANIFEST" | jq -r '.annotations."team"')
+              if [ "$TEAM" != "ml-team" ]; then
+                echo "ERROR: Expected team='ml-team', got '$TEAM'"
+                exit 1
+              fi
+              echo "✓ team=ml-team"
+
+              # Verify standard annotations still exist
+              if ! echo "$MANIFEST" | jq -e '.annotations."org.opencontainers.image.created"' > /dev/null; then
+                echo "ERROR: Missing org.opencontainers.image.created"
+                exit 1
+              fi
+              echo "✓ org.opencontainers.image.created exists"
+
+              echo "All additional annotations verified successfully!"
+      runAfter:
+        - run-llm-compressor-task

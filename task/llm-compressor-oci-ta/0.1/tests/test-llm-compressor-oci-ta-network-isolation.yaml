@@ -25,6 +25,8 @@ spec:
         results:
         - name: SOURCE_ARTIFACT
           type: string
+        - name: CACHI2_ARTIFACT
+          type: string
         workspaces:
           - name: tests-workspace
         volumes:
@@ -64,13 +66,40 @@ spec:
               chmod +x "$(workspaces.tests-workspace.path)/source/network_test.sh"
 
               echo "Created network isolation test script"
-          - name: create-trusted-artifact
+          - name: mock-cachi2
+            image: quay.io/konflux-ci/appstudio-utils:1610c1fc4cfc9c9053dbefc1146904a4df6659ef@sha256:90ac97b811073cb99a23232c15a08082b586c702b85da6200cf54ef505e3c50c
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              mkdir -p "$(workspaces.tests-workspace.path)/cachi2/output"
+
+              # Create mock hermeto bom.json (even though test fails before SBOM generation)
+              cat > "$(workspaces.tests-workspace.path)/cachi2/output/bom.json" << 'BOM_EOF'
+              {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.5",
+                "version": 1,
+                "metadata": {
+                  "component": {"type": "application", "name": "test-network"}
+                },
+                "components": []
+              }
+              BOM_EOF
+          - name: create-source-artifact
             image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
             args:
               - create
               - --store
               - $(params.ociStorage)
               - $(results.SOURCE_ARTIFACT.path)=$(workspaces.tests-workspace.path)/source
+          - name: create-cachi2-artifact
+            image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:adf22f3ec90bfa3f7e2c832a7d52febd1ea31aa9fff6db21324c965d7d622327
+            args:
+              - create
+              - --store
+              - $(params.ociStorage)
+              - $(results.CACHI2_ARTIFACT.path)=$(workspaces.tests-workspace.path)/cachi2
     - name: run-llm-compressor-task
       taskRef:
         name: llm-compressor-oci-ta
@@ -78,7 +107,7 @@ spec:
         - name: SOURCE_ARTIFACT
           value: $(tasks.mock-trusted-artifact.results.SOURCE_ARTIFACT)
         - name: CACHI2_ARTIFACT
-          value: ""
+          value: $(tasks.mock-trusted-artifact.results.CACHI2_ARTIFACT)
         - name: IMAGE
           value: registry-service.kind-registry/test-network-isolation:latest
         - name: COMPRESSOR_IMAGE
@@ -87,6 +116,12 @@ spec:
           value: "network_test.sh"
         - name: HERMETIC
           value: "true"
+        - name: SBOM_TYPE
+          value: "cyclonedx"
+        - name: GIT_URL
+          value: "https://github.com/example/test-network-repo.git"
+        - name: GIT_COMMIT
+          value: "abcd1234567890abcd1234567890abcd12345678"
         - name: caTrustConfigMapName
           value: trusted-ca
         - name: caTrustConfigMapKey

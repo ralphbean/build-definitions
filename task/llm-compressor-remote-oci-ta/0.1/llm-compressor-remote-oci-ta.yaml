@@ -76,6 +76,11 @@ spec:
   - description: Source repository commit SHA for OCI artifact annotations
     name: GIT_COMMIT
     type: string
+  - default: []
+    description: Additional key=value annotations that should be applied to the OCI
+      artifact
+    name: ADDITIONAL_ANNOTATIONS
+    type: array
   - description: The platform to build on
     name: PLATFORM
     type: string
@@ -437,7 +442,9 @@ spec:
       name: ssh
       readOnly: true
     workingDir: /var/workdir
-  - computeResources:
+  - args:
+    - $(params.ADDITIONAL_ANNOTATIONS[*])
+    computeResources:
       limits:
         memory: 2Gi
       requests:
@@ -495,6 +502,17 @@ spec:
         echo "Adding org.opencontainers.image.source annotation: ${GIT_URL}"
         yq -oj -i '.annotations."org.opencontainers.image.source" = "'${GIT_URL}'"' artifact-manifest.json
       fi
+
+      # Add additional annotations from generate-labels or user-provided
+      for annotation in "$@"; do
+        if [ -n "$annotation" ]; then
+          # Parse key=value format
+          key="${annotation%%=*}"
+          value="${annotation#*=}"
+          echo "Adding additional annotation: ${key}=${value}"
+          yq -oj -i ".annotations.\"${key}\" = \"${value}\"" artifact-manifest.json
+        fi
+      done
 
       echo "Ensuring that the empty blob exists, for the image manifest config."
       if ! echo -n "{}" | oras blob push \

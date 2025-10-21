@@ -149,6 +149,29 @@ spec:
               # Create a mock cachi2 directory with environment file
               mkdir -p "$(workspaces.tests-workspace.path)/cachi2/output"
 
+              # Create a mock hermeto bom.json
+              cat > "$(workspaces.tests-workspace.path)/cachi2/output/bom.json" << 'BOM_EOF'
+              {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.5",
+                "version": 1,
+                "metadata": {
+                  "component": {
+                    "type": "application",
+                    "name": "test-hermetic-app"
+                  }
+                },
+                "components": [
+                  {
+                    "type": "library",
+                    "name": "hermetic-test-lib",
+                    "version": "2.0.0",
+                    "purl": "pkg:pypi/hermetic-test-lib@2.0.0"
+                  }
+                ]
+              }
+              BOM_EOF
+
               # Create cachi2.env with Hugging Face environment variables
               cat > "$(workspaces.tests-workspace.path)/cachi2/cachi2.env" << 'EOF'
               export HF_HUB_OFFLINE=1
@@ -200,7 +223,11 @@ spec:
         - name: HERMETIC
           value: "true"
         - name: SBOM_TYPE
-          value: "spdx"
+          value: "cyclonedx"
+        - name: GIT_URL
+          value: "https://github.com/example/test-hermetic-repo.git"
+        - name: GIT_COMMIT
+          value: "fedcba0987654321fedcba0987654321fedcba09"
         - name: caTrustConfigMapName
           value: trusted-ca
         - name: caTrustConfigMapKey
