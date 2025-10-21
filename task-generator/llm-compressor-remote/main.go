@@ -256,9 +256,9 @@ if ! [[ $IS_LOCALHOST ]]; then
 		ret += "\n  echo \"[$(date --utc -Ins)] Rsync back\""
 		ret += "\n  rsync -razW --stats \"$SSH_HOST:$BUILD_DIR/workspaces/workdir/\" /var/workdir/"
 
-		// Sync back volumes
+		// Sync back volumes (but skip read-only volumes like ConfigMaps)
 		for _, volume := range step.VolumeMounts {
-			if syncVolumes[volume.Name] {
+			if syncVolumes[volume.Name] && !volume.ReadOnly {
 				ret += "\n  rsync -razW --stats \"$SSH_HOST:$BUILD_DIR/volumes/" + volume.Name + "/\" " + volume.MountPath + "/"
 			}
 		}

@@ -409,7 +409,6 @@ spec:
           --user=0 "${PODMAN_NVIDIA_ARGS[@]@Q}" --rm "${BUILDER_IMAGE@Q}" /scripts/script-compress-model.sh "${@@Q}"
         echo "[$(date --utc -Ins)] Rsync back"
         rsync -razW --stats "$SSH_HOST:$BUILD_DIR/workspaces/workdir/" /var/workdir/
-        rsync -razW --stats "$SSH_HOST:$BUILD_DIR/volumes/trusted-ca/" /mnt/trusted-ca/
         rsync -razW --stats "$SSH_HOST:$BUILD_DIR/results/" "/tekton/results/"
       else
         echo "[$(date --utc -Ins)] Executing compression locally (localhost mode)"
