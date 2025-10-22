@@ -488,10 +488,6 @@ spec:
         requests:
           cpu: 250m
           memory: 512Mi
-      securityContext:
-        capabilities:
-          add:
-            - SETFCAP
     - name: sbom-generate
       image: quay.io/konflux-ci/mobster:1.0.0-1760010717@sha256:213269cdde962187fef52532c5794589a9bd309962333d150e46b5dfe8e50461
       workingDir: /var/workdir
